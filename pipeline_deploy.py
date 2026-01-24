@@ -28,18 +28,21 @@ def model_execution_op():
     )
 
 # --- 3. Define the Pipeline ---
-@dsl.pipeline(
-    name="drought-forecasting-pipeline",
-    description="Automated drought prediction pipeline with SHAP and W&B logging."
-)
+@dsl.pipeline(name="drought-forecasting-pipeline")
 def drought_pipeline():
-    # Step 1: Run Tuning
+    # 1. Tuning Task
     tuning_task = hyperparameter_tuning_op()
+    tuning_task.set_cpu_limit('4')
+    tuning_task.set_memory_limit('16G')
+    tuning_task.set_retry_limit(1)  # Automatically retry once if it fails
     
-    # Step 2: Run Execution (only after tuning is finished)
+    # 2. Execution Task (Memory intensive for SHAP/Plots)
     execution_task = model_execution_op()
+    execution_task.set_cpu_limit('8')
+    execution_task.set_memory_limit('32G')
+    execution_task.set_timeout('3600s') # Kill job if it takes > 1 hour
+    
     execution_task.after(tuning_task)
-
 # --- 4. Compile and Submit to Vertex AI ---
 if __name__ == "__main__":
     # Compile the pipeline to a JSON file

@@ -30,6 +30,21 @@ from xgboost import XGBRegressor
 # Ensure save_best_params is in your src/ML_functions.py
 from src.ML_functions import * ################################################### ENVIRONMENT SETUP ###################################################
 
+
+import logging
+import sys
+
+# Configure logging to output to stdout for Google Cloud to pick up
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
+logger = logging.getLogger(__name__)
+
+# Use it like this:
+logger.info("Starting drought prediction training...")
+
 # Vertex AI provides AIP_CHECKPOINT_DIR as the GCS bucket path mount
 BASE_DIR = Path(os.getenv("AIP_CHECKPOINT_DIR", os.getcwd()))
 DATA_FOLDER = BASE_DIR / 'input_collector'

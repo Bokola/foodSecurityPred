@@ -41,7 +41,24 @@ import wandb
 
 # Cloud-native pathing: Import from the package structure
 # Ensure save_best_params and load_best_params are in your src/ML_functions.py
-from src.ML_functions import * ################################################### ENVIRONMENT SETUP ###################################################
+from src.ML_functions import * 
+
+
+import logging
+import sys
+
+# Configure logging to output to stdout for Google Cloud to pick up
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
+logger = logging.getLogger(__name__)
+
+# Use it like this:
+logger.info("Starting drought prediction training...")
+
+################################################### ENVIRONMENT SETUP ###################################################
 
 # Vertex AI sets AIP_CHECKPOINT_DIR to your GCS bucket path
 BASE_DIR = Path(os.getenv("AIP_CHECKPOINT_DIR", os.getcwd()))
