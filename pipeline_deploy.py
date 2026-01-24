@@ -34,13 +34,16 @@ def drought_pipeline():
     tuning_task = hyperparameter_tuning_op()
     tuning_task.set_cpu_limit('4')
     tuning_task.set_memory_limit('16G')
-    tuning_task.set_retry(num_retries=1)  # Automatically retry once if it fails
+    tuning_task.set_retry(num_retries=1) 
     
-    # 2. Execution Task (Memory intensive for SHAP/Plots)
+    # 2. Execution Task
     execution_task = model_execution_op()
     execution_task.set_cpu_limit('8')
     execution_task.set_memory_limit('32G')
-    execution_task.set_timeout('3600s') # Kill job if it takes > 1 hour
+    
+    # REMOVE execution_task.set_timeout('3600s') 
+    # In many KFP v2 versions, timeouts are managed via the 
+    # PipelineJob submission rather than the individual task.
     
     execution_task.after(tuning_task)
 # --- 4. Compile and Submit to Vertex AI ---
