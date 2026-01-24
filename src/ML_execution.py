@@ -1,15 +1,10 @@
-
+# -*- coding: utf-8 -*-
 """
 Optimized for Google Vertex AI
 Original Author: Tim Busker
 
 This script executes the machine learning models on the High Performance Cluster (HPC).
-It uses the input_data.csv file created by the input_collector.py and feature_engineering.py scripts. 
-Current implementation allows for a random forest model or an XGBoost model, on multiple spatial levels
-(county, country, livelihood zone, all). It was also tested whether the variation of FEWS IPC was
- a good way of pooling the counties. This was not the case. 
 """
-
 
 #####################################################################################################################
 ################################################### IMPORT PACKAGES  ###################################################
@@ -40,14 +35,11 @@ import shap
 import wandb
 
 # Cloud-native pathing: Import from the package structure
-# Ensure save_best_params and load_best_params are in your src/ML_functions.py
 from src.ML_functions import * 
-
-
 import logging
 import sys
 
-# Configure logging to output to stdout for Google Cloud to pick up
+# Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -55,18 +47,15 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Use it like this:
 logger.info("Starting drought prediction training...")
 
 ################################################### ENVIRONMENT SETUP ###################################################
 
-# Vertex AI sets AIP_CHECKPOINT_DIR to your GCS bucket path
 BASE_DIR = Path(os.getenv("AIP_CHECKPOINT_DIR", os.getcwd()))
 DATA_FOLDER = BASE_DIR / 'input_collector'
 RESULTS_DIR = BASE_DIR / 'ML_results'
 PLOTS_DIR = RESULTS_DIR / 'plots'
 
-# Ensure directories exist (Pathlib handles GCS fuse mounts correctly)
 for folder in [RESULTS_DIR, PLOTS_DIR]:
     folder.mkdir(parents=True, exist_ok=True)
 
@@ -74,7 +63,7 @@ for folder in [RESULTS_DIR, PLOTS_DIR]:
 
 model_list = ['xgb']
 region_list = ['HOA'] 
-aggregations = ['cluster'] # Options: 'cluster', 'all', 'county'
+aggregations = ['cluster'] 
 experiment_list = ['RUN_FINAL_20'] 
 leads = [0, 1, 2, 3, 4, 8, 12] 
 
@@ -95,7 +84,6 @@ for experiment, model_type, aggregation, region in design_variables:
     
     print(f'Starting Execution: {experiment} | Model: {model_type}')
     
-    # Initialize WandB for cloud experiment tracking
     wandb.init(
         project="drought_forecasting",
         name=f"Final_{experiment}_{model_type}",
@@ -104,7 +92,6 @@ for experiment, model_type, aggregation, region in design_variables:
 
     traintest_ratio = int(experiment[-2:]) / 100 
 
-    # Load Data
     input_path = DATA_FOLDER / 'input_master.csv'
     if not input_path.exists():
         raise FileNotFoundError(f"Data not found at {input_path}")
@@ -116,7 +103,6 @@ for experiment, model_type, aggregation, region in design_variables:
     if not with_WPG:
         input_master = input_master[input_master.columns.drop(list(input_master.filter(regex='WPG')))]
 
-    # Clustering / Aggregation Logic
     if aggregation == 'cluster':
         cluster_list = ['p', 'ap', 'other']
     else:
@@ -137,28 +123,34 @@ for experiment, model_type, aggregation, region in design_variables:
             for lead in leads:
                 # Filter for lead time
                 input_df3 = input_df2[input_df2['lead'] == lead].sort_index()
-                if input_df3.empty: continue
+                if input_df3.empty: 
+                    continue
 
-                # Clean features for ML
+                # 1. SYNCHRONIZED CLEANING
+                input_df3 = input_df3.replace([np.inf, -np.inf], np.nan)
+                input_df3 = input_df3.dropna(subset=['FEWS_CS'])
+
+                if input_df3.empty:
+                    logger.warning(f"Skipping {county} Lead {lead}: No valid labels found.")
+                    continue
+
+                # 2. DEFINE LABELS AND FEATURES
                 labels = input_df3['FEWS_CS']
                 features = input_df3.drop(['lead', 'base_forecast', 'FEWS_CS'], axis=1, errors='ignore')
+                
                 cat_cols = features.select_dtypes(include=['object', 'category']).columns 
                 features.drop(cat_cols, axis=1, inplace=True)
 
-                # Split
+                # 3. Split
                 train_X, test_X, train_y, test_y = train_test_split(
                     features, labels, test_size=traintest_ratio, shuffle=False
                 )
 
                 #####################################################################
-                # --- DYNAMIC HYPERPARAMETER LOADING (Linked to HP_tuning.py) ---
+                # --- DYNAMIC HYPERPARAMETER LOADING ---
                 #####################################################################
                 hp_file_path = RESULTS_DIR / 'HP_results' / f"{aggregation}_{experiment}_{region}_{cluster}_{model_type}" / f"best_params_{model_type}_L{lead}.json"
-                
-                # Defaults if HP_tuning hasn't run yet
                 defaults = {"n_estimators": 400, "max_depth": 4, "learning_rate": 0.01}
-                
-                # Load JSON from GCS via helper function
                 tuned_params = load_best_params(hp_file_path, defaults)
 
                 if model_type == 'xgb':
@@ -183,7 +175,7 @@ for experiment, model_type, aggregation, region in design_variables:
                 }, index=[0])
                 eval_stats = pd.concat([eval_stats, iter_stats])
 
-                # SHAP Plots (Sent directly to WandB)
+                # SHAP Plots
                 explainer = shap.Explainer(model_obj)
                 shap_values = explainer(train_X)
                 fig, ax = plt.subplots()
