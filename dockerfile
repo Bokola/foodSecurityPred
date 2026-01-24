@@ -14,7 +14,7 @@ COPY pyproject.toml uv.lock ./
 
 # Install dependencies into the SYSTEM python environment
 # This ensures any 'python' command finds the packages
-RUN uv pip install --system --frozen -r pyproject.toml
+RUN uv pip install --system -r pyproject.toml
 
 # Copy source code and input data
 COPY src/ ./src/
