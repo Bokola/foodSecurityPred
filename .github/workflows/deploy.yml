@@ -1,36 +1,72 @@
-name: Build and Push to Artifact Registry
+name: Build, Push, and Deploy to Vertex AI
 
 on:
   push:
-    branches: [ "main" ] # Runs whenever you push to main
+    branches: [ "main" ]
+
+env:
+  PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+  REGION: "us-central1"
+  IMAGE_NAME: "drought-model"
+  GAR_REPO: "drought-repo"
+  BUCKET_NAME: "${{ secrets.GCP_PROJECT_ID }}-drought-ml"
 
 jobs:
-  setup-build-publish:
-    name: Setup, Build, and Publish
+  deploy:
     runs-on: ubuntu-latest
     permissions:
       contents: 'read'
-      id-token: 'write' # Required for Workload Identity Federation
+      id-token: 'write'
 
     steps:
-    - name: Checkout Code
-      uses: actions/checkout@v4
+      # 1. Get the code from GitHub
+      - name: Checkout
+        uses: actions/checkout@v4
 
-    - name: Authenticate to Google Cloud
-      uses: 'google-github-actions/auth@v2'
-      with:
-        workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
-        service_account: ${{ secrets.GCP_PROJECT_NUMBER }}-compute@developer.gserviceaccount.com
+      # 2. Authenticate to Google Cloud using WIF
+      - id: 'auth'
+        name: 'Authenticate to Google Cloud'
+        uses: 'google-github-actions/auth@v2'
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: '${{ secrets.GCP_PROJECT_NUMBER }}-compute@developer.gserviceaccount.com'
 
-    - name: Set up Cloud SDK
-      uses: 'google-github-actions/setup-gcloud@v2'
+      # 3. Setup gcloud CLI
+      - name: 'Set up Cloud SDK'
+        uses: 'google-github-actions/setup-gcloud@v2'
 
-    - name: Configure Docker
-      run: |
-        gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
+      # 4. Download input data from GCS (Crucial step!)
+      - name: 'Download Input Data'
+        run: |
+          mkdir -p input_collector
+          gsutil -m cp -r "gs://${{ env.BUCKET_NAME }}/input_collector/*" ./input_collector/
+          echo "Data download complete. Content check:"
+          ls -R ./input_collector
 
-    - name: Build and Push Container
-      run: |
-        IMAGE_NAME="us-central1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/drought-repo/model:latest"
-        docker build -t $IMAGE_NAME .
-        docker push $IMAGE_NAME
+      # 5. Docker Auth & Build
+      - name: 'Docker Auth'
+        run: |-
+          gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev
+
+      - name: 'Build and Push Container'
+        run: |-
+          IMAGE_URI="${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.GAR_REPO }}/${{ env.IMAGE_NAME }}:latest"
+          docker build -t "$IMAGE_URI" .
+          docker push "$IMAGE_URI"
+
+      # 6. Run Python Pipeline Deployment
+      - name: 'Set up Python'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 'Install Orchestration Dependencies'
+        run: |
+          pip install google-cloud-aiplatform kfp
+
+      - name: 'Run Pipeline Deploy Script'
+        env:
+          PROJECT_ID: ${{ env.PROJECT_ID }}
+          REGION: ${{ env.REGION }}
+        run: |
+          python pipeline_deploy.py
