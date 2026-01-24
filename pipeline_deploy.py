@@ -34,7 +34,7 @@ def drought_pipeline():
     tuning_task = hyperparameter_tuning_op()
     tuning_task.set_cpu_limit('4')
     tuning_task.set_memory_limit('16G')
-    tuning_task.set_retry_limit(1)  # Automatically retry once if it fails
+    tuning_task.set_retry(num_retries=1)  # Automatically retry once if it fails
     
     # 2. Execution Task (Memory intensive for SHAP/Plots)
     execution_task = model_execution_op()
