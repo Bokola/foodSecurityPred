@@ -2,6 +2,10 @@
 input_collector/
 local_test_env
 gcp-steps.ini
+HP_results/
+ML_results/
+wandb/
+
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
