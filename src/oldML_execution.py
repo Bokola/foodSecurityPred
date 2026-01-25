@@ -12,7 +12,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import matplotlib
-matplotlib.use("Agg")  # ✅ Mandatory for Vertex AI headless environments
+matplotlib.use("Agg")  # ✅ headless-safe
 import matplotlib.pyplot as plt
 
 from sklearn.model_selection import train_test_split
@@ -44,12 +44,31 @@ RESULTS_DIR = BASE_DIR / "ML_results"
 PLOTS_DIR = RESULTS_DIR / "plots"
 HP_RESULT_ROOT = BASE_DIR / "HP_results"
 
+for folder in [RESULTS_DIR, PLOTS_DIR]:
+    folder.mkdir(parents=True, exist_ok=True)
+
+# ---------------------------------------------------------------------
+# DESIGN
+# ---------------------------------------------------------------------
+model_list = ["xgb"]
+region_list = ["HOA"]
+aggregations = ["cluster"]
+experiment_list = ["RUN_FINAL_20"]
+leads = [0, 1, 2, 3, 4, 8, 12]
+
+design_variables = [
+    (e, m, a, r)
+    for e in experiment_list
+    for m in model_list
+    for a in aggregations
+    for r in region_list
+]
+
 # ---------------------------------------------------------------------
 # HELPERS
 # ---------------------------------------------------------------------
 def clean_scientific_brackets(df):
-    """Force-cleans bracketed notation and scientific strings."""
-    cols_to_skip = {"county", "lhz", "base_forecast", "FEWS_CS", "date", "Unnamed: 0"}
+    cols_to_skip = {"county", "lhz", "base_forecast", "FEWS_CS", "date"}
 
     for col in df.columns:
         if col in cols_to_skip:
@@ -59,12 +78,12 @@ def clean_scientific_brackets(df):
             sample = df[col].dropna().astype(str)
             if not sample.empty and sample.iloc[0].count("-") == 2:
                 continue
-            
-            # Remove brackets, spaces, and coerce to numeric
+
             df[col] = (
                 df[col]
                 .astype(str)
-                .str.replace(r"[\[\]\s]", "", regex=True)
+                .str.replace(r"[\[\]]", "", regex=True)
+                .str.strip()
             )
             df[col] = pd.to_numeric(df[col], errors="coerce")
 
@@ -76,21 +95,6 @@ def clean_scientific_brackets(df):
 def run_ml_pipeline():
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     PLOTS_DIR.mkdir(parents=True, exist_ok=True)
-
-    model_list = ["xgb"]
-    region_list = ["HOA"]
-    aggregations = ["cluster"]
-    experiment_list = ["RUN_FINAL_20"]
-    leads = [0, 1, 2, 3, 4, 8, 12]
-
-    design_variables = [
-        (e, m, a, r)
-        for e in experiment_list
-        for m in model_list
-        for a in aggregations
-        for r in region_list
-    ]
-
     for experiment, model_type, aggregation, region in design_variables:
         logger.info(f"Starting Execution: {experiment} | {model_type}")
 
@@ -118,6 +122,7 @@ def run_ml_pipeline():
 
         for cluster in cluster_list:
             eval_stats = []
+
             df_cluster = (
                 input_master[input_master["lhz"] == cluster]
                 if aggregation == "cluster"
@@ -129,24 +134,20 @@ def run_ml_pipeline():
                 if df.empty:
                     continue
 
-                # ✅ STEP 1: BRACKET CLEANING
                 df = clean_scientific_brackets(df)
                 df = df.dropna(subset=["FEWS_CS"])
                 if df.empty:
                     continue
 
                 y = df["FEWS_CS"]
-                
-                # ✅ STEP 2: NUMERIC FEATURE ISOLATION
                 X = df.drop(
                     ["lead", "base_forecast", "FEWS_CS", "county", "lhz"],
                     axis=1,
                     errors="ignore",
                 )
 
-                # ✅ STEP 3: FINAL NUMERIC GUARANTEE (Fixes '[2.5E0]' error)
-                X = X.apply(pd.to_numeric, errors='coerce')
-                X = X.select_dtypes(include=[np.number]).astype(float).fillna(0)
+                # ✅ NUMERIC-ONLY GUARANTEE
+                X = X.select_dtypes(include=[np.number]).astype(float)
 
                 train_X, test_X, train_y, test_y = train_test_split(
                     X, y, test_size=traintest_ratio, shuffle=False
@@ -167,39 +168,43 @@ def run_ml_pipeline():
                 model.fit(train_X, train_y)
                 preds = model.predict(test_X)
 
-                eval_stats.append({
-                    "cluster": cluster, "lead": lead,
-                    "mae": mean_absolute_error(test_y, preds),
-                    "rmse": np.sqrt(mean_squared_error(test_y, preds)),
-                    "r2": r2_score(test_y, preds),
-                })
+                eval_stats.append(
+                    {
+                        "cluster": cluster,
+                        "lead": lead,
+                        "mae": mean_absolute_error(test_y, preds),
+                        "rmse": np.sqrt(mean_squared_error(test_y, preds)),
+                        "r2": r2_score(test_y, preds),
+                    }
+                )
 
-                # --- SHAP PLOTTING ---
                 try:
-                    plt.figure(figsize=(10, 6))
                     explainer = shap.TreeExplainer(model)
-                    shap_sample = train_X.sample(min(100, len(train_X)))
-                    shap_X = shap_sample.to_numpy(dtype=float)
+                    # shap_vals = explainer.shap_values(train_X.sample(min(100, len(train_X))))
+                    # shap.summary_plot(shap_vals, train_X, plot_type="bar", show=False)
+                    shap_X = train_X.sample(min(100, len(train_X))).to_numpy(dtype=float)
+
                     shap_vals = explainer.shap_values(shap_X)
 
-                    plt.clf()
                     shap.summary_plot(
-                        shap_vals, features=shap_X, feature_names=train_X.columns,
-                        plot_type="bar", show=False
+                        shap_vals,
+                        features=shap_X,
+                        feature_names=train_X.columns,
+                        plot_type="bar",
+                        show=False,
                     )
 
-                    plot_filename = f"SHAP_{cluster}_L{lead}.png"
-                    plot_path = PLOTS_DIR / plot_filename
-                    plt.savefig(plot_path, bbox_inches='tight')
-                    
-                    wandb.log({f"SHAP_{cluster}_L{lead}": wandb.Image(str(plot_path))})
+                    wandb.log({f"SHAP_{cluster}_L{lead}": wandb.Image(plt)})
                     plt.close()
                 except Exception as e:
-                    logger.warning(f"SHAP failed for {cluster} L{lead}: {e}")
+                    logger.warning(f"SHAP failed: {e}")
 
-            pd.DataFrame(eval_stats).to_csv(RESULTS_DIR / f"eval_stats_{cluster}.csv", index=False)
+            pd.DataFrame(eval_stats).to_csv(
+                RESULTS_DIR / f"eval_stats_{cluster}.csv", index=False
+            )
 
         wandb.finish()
+
 
 if __name__ == "__main__":
     run_ml_pipeline()
