@@ -1,203 +1,105 @@
 # -*- coding: utf-8 -*-
-"""
-Optimized for Google Vertex AI
-Original Author: Tim Busker
-"""
-
 import os
 import sys
+import re
+import json
 import logging
 from pathlib import Path
-
 import numpy as np
 import pandas as pd
 import matplotlib
-matplotlib.use("Agg")  # ✅ Mandatory for Vertex AI headless environments
+matplotlib.use("Agg")  
 import matplotlib.pyplot as plt
-
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import r2_score, mean_absolute_error, mean_squared_error
 from xgboost import XGBRegressor
 import shap
 import wandb
-
 from src.ML_functions import load_best_params
 
-# ---------------------------------------------------------------------
-# LOGGING
-# ---------------------------------------------------------------------
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    handlers=[logging.StreamHandler(sys.stdout)]
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------
-# PATHS
-# ---------------------------------------------------------------------
 BUCKET_NAME = os.getenv("BUCKET_NAME")
 BASE_DIR = Path(f"/gcs/{BUCKET_NAME.replace('gs://', '')}") if BUCKET_NAME else Path(os.getcwd())
-
 DATA_FOLDER = BASE_DIR / "input_collector"
 RESULTS_DIR = BASE_DIR / "ML_results"
 PLOTS_DIR = RESULTS_DIR / "plots"
 HP_RESULT_ROOT = BASE_DIR / "HP_results"
 
-# ---------------------------------------------------------------------
-# HELPERS
-# ---------------------------------------------------------------------
 def clean_scientific_brackets(df):
-    """Force-cleans bracketed notation and scientific strings."""
-    cols_to_skip = {"county", "lhz", "base_forecast", "FEWS_CS", "date", "Unnamed: 0"}
-
+    df = df.copy()
+    df.columns = [re.sub(r'[^a-zA-Z0-9_]', '', str(c).replace("[", "").replace("]", "").strip()) for c in df.columns]
+    cols_to_skip = {"county", "lhz", "base_forecast", "FEWS_CS", "FEWSCS", "date", "Unnamed0", "lead"}
     for col in df.columns:
-        if col in cols_to_skip:
-            continue
-
-        if df[col].dtype == "object":
-            sample = df[col].dropna().astype(str)
-            if not sample.empty and sample.iloc[0].count("-") == 2:
-                continue
-            
-            # Remove brackets, spaces, and coerce to numeric
-            df[col] = (
-                df[col]
-                .astype(str)
-                .str.replace(r"[\[\]\s]", "", regex=True)
-            )
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-
+        if col in cols_to_skip: continue
+        cleaned = df[col].astype(str).str.replace(r'[^0-9.eE\-]', '', regex=True)
+        df[col] = pd.to_numeric(cleaned, errors="coerce")
+    numeric_cols = df.select_dtypes(include=[np.number]).columns
+    df[numeric_cols] = df[numeric_cols].fillna(0.0).astype(np.float64)
     return df
 
-# ---------------------------------------------------------------------
-# MAIN PIPELINE
-# ---------------------------------------------------------------------
 def run_ml_pipeline():
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     PLOTS_DIR.mkdir(parents=True, exist_ok=True)
 
-    model_list = ["xgb"]
-    region_list = ["HOA"]
-    aggregations = ["cluster"]
-    experiment_list = ["RUN_FINAL_20"]
-    leads = [0, 1, 2, 3, 4, 8, 12]
+    input_master = pd.read_csv(DATA_FOLDER / "input_master.csv", low_memory=False)
+    input_master = clean_scientific_brackets(input_master)
 
-    design_variables = [
-        (e, m, a, r)
-        for e in experiment_list
-        for m in model_list
-        for a in aggregations
-        for r in region_list
-    ]
+    for cluster in ["p", "ap", "other"]:
+        wandb.init(project="drought_forecasting", name=f"Final_xgb_{cluster}")
+        df_cluster = input_master[input_master["lhz"] == cluster]
+        
+        for lead in [0, 1, 2, 3, 4, 8, 12]:
+            df = df_cluster[df_cluster["lead"] == lead].sort_index().copy()
+            if df.empty: continue
+            
+            target_col = "FEWSCS" if "FEWSCS" in df.columns else "FEWS_CS"
+            y = pd.to_numeric(df[target_col], errors="coerce").fillna(0.0).astype(np.float64)
+            X = df.drop(columns=[target_col, "lead", "base_forecast", "county", "lhz", "date", "Unnamed0"], errors="ignore")
+            X = X.select_dtypes(include=[np.number]).astype(np.float64).fillna(0.0)
 
-    for experiment, model_type, aggregation, region in design_variables:
-        logger.info(f"Starting Execution: {experiment} | {model_type}")
+            train_X, test_X, train_y, test_y = train_test_split(X, y, test_size=0.2, shuffle=False)
+            
+            hp_file = HP_RESULT_ROOT / f"cluster_RUN_FINAL_20_HOA_{cluster}_xgb" / f"best_params_xgb_L{lead}.json"
+            params = load_best_params(hp_file, {"n_estimators": 200, "max_depth": 4, "learning_rate": 0.01})
+            
+            # Use explicit numeric parameters for safety
+            model = XGBRegressor(**params, random_state=42, objective="reg:squarederror", base_score=0.5)
+            model.fit(train_X, train_y)
 
-        wandb.init(
-            project="drought_forecasting",
-            name=f"Final_{experiment}_{model_type}",
-            settings=wandb.Settings(start_method="thread"),
-        )
-
-        traintest_ratio = int(experiment[-2:]) / 100
-
-        input_master = pd.read_csv(DATA_FOLDER / "input_master.csv")
-        input_master.columns = input_master.columns.astype(str).str.strip()
-        input_master.drop(columns=["Unnamed: 0"], errors="ignore", inplace=True)
-
-        if "date" in input_master.columns:
-            input_master.index = pd.to_datetime(input_master["date"])
-            input_master.drop(columns=["date"], inplace=True)
-
-        input_master["lead"] = pd.to_numeric(
-            input_master["lead"], errors="coerce"
-        ).fillna(0).astype(int)
-
-        cluster_list = ["p", "ap", "other"] if aggregation == "cluster" else ["no_cluster"]
-
-        for cluster in cluster_list:
-            eval_stats = []
-            df_cluster = (
-                input_master[input_master["lhz"] == cluster]
-                if aggregation == "cluster"
-                else input_master.copy()
-            )
-
-            for lead in leads:
-                df = df_cluster[df_cluster["lead"] == lead].sort_index().copy()
-                if df.empty:
-                    continue
-
-                # ✅ STEP 1: BRACKET CLEANING
-                df = clean_scientific_brackets(df)
-                df = df.dropna(subset=["FEWS_CS"])
-                if df.empty:
-                    continue
-
-                y = df["FEWS_CS"]
+            # --- SHAP BLOCK: THE OPTIMIZED KERNEL POWERHOUSE ---
+            try:
+                plt.close('all')
+                logger.info(f"Computing Optimized Kernel SHAP for {cluster} L{lead}...")
                 
-                # ✅ STEP 2: NUMERIC FEATURE ISOLATION
-                X = df.drop(
-                    ["lead", "base_forecast", "FEWS_CS", "county", "lhz"],
-                    axis=1,
-                    errors="ignore",
+                # 1. Background set: 40 samples is sufficient for convergence in most tabular tasks
+                background = train_X.sample(min(40, len(train_X)))
+                
+                # 2. Evaluation set: 50 samples creates a dense, readable summary plot
+                evaluation = train_X.sample(min(50, len(train_X)))
+                
+                # 3. KernelExplainer ignores XGBoost metadata and uses the .predict() method directly
+                explainer = shap.KernelExplainer(model.predict, background)
+                
+                # 4. nsamples controls the accuracy. 100 is a good balance for speed
+                shap_vals = explainer.shap_values(evaluation, nsamples=100, silent=True)
+
+                fig = plt.figure(figsize=(10, 6))
+                shap.summary_plot(
+                    shap_vals, 
+                    features=evaluation, 
+                    feature_names=list(train_X.columns), 
+                    show=False,
+                    plot_type="dot"
                 )
+                plt.title(f"Feature Importance (SHAP): {cluster} - Lead {lead}")
+                plt.savefig(PLOTS_DIR / f"SHAP_{cluster}_L{lead}.png", bbox_inches='tight', dpi=150)
+                plt.close(fig)
+                
+                logger.info(f"✅ KERNEL SHAP SUCCESS for {cluster} L{lead}")
 
-                # ✅ STEP 3: FINAL NUMERIC GUARANTEE (Fixes '[2.5E0]' error)
-                X = X.apply(pd.to_numeric, errors='coerce')
-                X = X.select_dtypes(include=[np.number]).astype(float).fillna(0)
-
-                train_X, test_X, train_y, test_y = train_test_split(
-                    X, y, test_size=traintest_ratio, shuffle=False
-                )
-
-                hp_file = (
-                    HP_RESULT_ROOT
-                    / f"{aggregation}_{experiment}_{region}_{cluster}_{model_type}"
-                    / f"best_params_{model_type}_L{lead}.json"
-                )
-
-                params = load_best_params(
-                    hp_file,
-                    {"n_estimators": 400, "max_depth": 4, "learning_rate": 0.01},
-                )
-
-                model = XGBRegressor(**params, random_state=42)
-                model.fit(train_X, train_y)
-                preds = model.predict(test_X)
-
-                eval_stats.append({
-                    "cluster": cluster, "lead": lead,
-                    "mae": mean_absolute_error(test_y, preds),
-                    "rmse": np.sqrt(mean_squared_error(test_y, preds)),
-                    "r2": r2_score(test_y, preds),
-                })
-
-                # --- SHAP PLOTTING ---
-                try:
-                    plt.figure(figsize=(10, 6))
-                    explainer = shap.TreeExplainer(model)
-                    shap_sample = train_X.sample(min(100, len(train_X)))
-                    shap_X = shap_sample.to_numpy(dtype=float)
-                    shap_vals = explainer.shap_values(shap_X)
-
-                    plt.clf()
-                    shap.summary_plot(
-                        shap_vals, features=shap_X, feature_names=train_X.columns,
-                        plot_type="bar", show=False
-                    )
-
-                    plot_filename = f"SHAP_{cluster}_L{lead}.png"
-                    plot_path = PLOTS_DIR / plot_filename
-                    plt.savefig(plot_path, bbox_inches='tight')
-                    
-                    wandb.log({f"SHAP_{cluster}_L{lead}": wandb.Image(str(plot_path))})
-                    plt.close()
-                except Exception as e:
-                    logger.warning(f"SHAP failed for {cluster} L{lead}: {e}")
-
-            pd.DataFrame(eval_stats).to_csv(RESULTS_DIR / f"eval_stats_{cluster}.csv", index=False)
+            except Exception as e:
+                logger.error(f"❌ SHAP FAILED for {cluster} L{lead}: {e}")
 
         wandb.finish()
 
