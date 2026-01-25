@@ -1,6 +1,6 @@
 # directories and files
 input_collector/
-local_test_env
+local_test_env/
 gcp-steps.ini
 HP_results/
 ML_results/
