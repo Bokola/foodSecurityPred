@@ -2,192 +2,209 @@
 """
 Optimized for Google Vertex AI
 Original Author: Tim Busker
-
-This script executes the machine learning models on the High Performance Cluster (HPC).
 """
 
-#####################################################################################################################
-################################################### IMPORT PACKAGES  ###################################################
-#####################################################################################################################
 import os
-import time
-import datetime
-import random as python_random
+import sys
+import logging
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import matplotlib
+matplotlib.use("Agg")  # ✅ headless-safe
 import matplotlib.pyplot as plt
-import seaborn as sns
-import geopandas as gpd
-from tqdm.auto import tqdm
 
-# SKLEARN 
-from sklearn.ensemble import RandomForestRegressor
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import r2_score, mean_absolute_error, mean_squared_error
-
-# XGBOOST & SHAP
 from xgboost import XGBRegressor
 import shap
-
-# LOGGING
 import wandb
 
-# Cloud-native pathing: Import from the package structure
-from src.ML_functions import * 
-import logging
-import sys
+from src.ML_functions import load_best_params
 
-# Configure logging
+# ---------------------------------------------------------------------
+# LOGGING
+# ---------------------------------------------------------------------
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
+    format="%(asctime)s - %(levelname)s - %(message)s",
     handlers=[logging.StreamHandler(sys.stdout)]
 )
 logger = logging.getLogger(__name__)
 
-logger.info("Starting drought prediction training...")
+# ---------------------------------------------------------------------
+# PATHS
+# ---------------------------------------------------------------------
+BUCKET_NAME = os.getenv("BUCKET_NAME")
+BASE_DIR = Path(f"/gcs/{BUCKET_NAME.replace('gs://', '')}") if BUCKET_NAME else Path(os.getcwd())
 
-################################################### ENVIRONMENT SETUP ###################################################
-
-BASE_DIR = Path(os.getenv("AIP_CHECKPOINT_DIR", os.getcwd()))
-DATA_FOLDER = BASE_DIR / 'input_collector'
-RESULTS_DIR = BASE_DIR / 'ML_results'
-PLOTS_DIR = RESULTS_DIR / 'plots'
+DATA_FOLDER = BASE_DIR / "input_collector"
+RESULTS_DIR = BASE_DIR / "ML_results"
+PLOTS_DIR = RESULTS_DIR / "plots"
+HP_RESULT_ROOT = BASE_DIR / "HP_results"
 
 for folder in [RESULTS_DIR, PLOTS_DIR]:
     folder.mkdir(parents=True, exist_ok=True)
 
-################################################### DESIGN VARIABLES ###################################################
+# ---------------------------------------------------------------------
+# DESIGN
+# ---------------------------------------------------------------------
+model_list = ["xgb"]
+region_list = ["HOA"]
+aggregations = ["cluster"]
+experiment_list = ["RUN_FINAL_20"]
+leads = [0, 1, 2, 3, 4, 8, 12]
 
-model_list = ['xgb']
-region_list = ['HOA'] 
-aggregations = ['cluster'] 
-experiment_list = ['RUN_FINAL_20'] 
-leads = [0, 1, 2, 3, 4, 8, 12] 
+design_variables = [
+    (e, m, a, r)
+    for e in experiment_list
+    for m in model_list
+    for a in aggregations
+    for r in region_list
+]
 
-with_WPG = False 
-end_date = '2022-06-01 00:00:00' 
+# ---------------------------------------------------------------------
+# HELPERS
+# ---------------------------------------------------------------------
+def clean_scientific_brackets(df):
+    cols_to_skip = {"county", "lhz", "base_forecast", "FEWS_CS", "date"}
 
-design_variables = [(experiment, model_type, aggregation, region) 
-                    for experiment in experiment_list 
-                    for model_type in model_list 
-                    for aggregation in aggregations 
-                    for region in region_list]
+    for col in df.columns:
+        if col in cols_to_skip:
+            continue
 
-#######################################################################################################################
-################################################### EXECUTION LOOP ####################################################
-#######################################################################################################################
+        if df[col].dtype == "object":
+            sample = df[col].dropna().astype(str)
+            if not sample.empty and sample.iloc[0].count("-") == 2:
+                continue
 
-for experiment, model_type, aggregation, region in design_variables:
-    
-    print(f'Starting Execution: {experiment} | Model: {model_type}')
-    
-    wandb.init(
-        project="drought_forecasting",
-        name=f"Final_{experiment}_{model_type}",
-        config={"leads": leads, "aggregation": aggregation}
-    )
+            df[col] = (
+                df[col]
+                .astype(str)
+                .str.replace(r"[\[\]]", "", regex=True)
+                .str.strip()
+            )
+            df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    traintest_ratio = int(experiment[-2:]) / 100 
+    return df
 
-    input_path = DATA_FOLDER / 'input_master.csv'
-    if not input_path.exists():
-        raise FileNotFoundError(f"Data not found at {input_path}")
-        
-    input_master = pd.read_csv(input_path, index_col=0)
-    input_master.index = pd.to_datetime(input_master.index)
-    input_master.drop('year', axis=1, inplace=True, errors='ignore')
+# ---------------------------------------------------------------------
+# MAIN PIPELINE
+# ---------------------------------------------------------------------
+def run_ml_pipeline():
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    PLOTS_DIR.mkdir(parents=True, exist_ok=True)
+    for experiment, model_type, aggregation, region in design_variables:
+        logger.info(f"Starting Execution: {experiment} | {model_type}")
 
-    if not with_WPG:
-        input_master = input_master[input_master.columns.drop(list(input_master.filter(regex='WPG')))]
+        wandb.init(
+            project="drought_forecasting",
+            name=f"Final_{experiment}_{model_type}",
+            settings=wandb.Settings(start_method="thread"),
+        )
 
-    if aggregation == 'cluster':
-        cluster_list = ['p', 'ap', 'other']
-    else:
-        cluster_list = ['no_cluster']
+        traintest_ratio = int(experiment[-2:]) / 100
 
-    for cluster in cluster_list:
-        preds_storage = pd.DataFrame()
-        eval_stats = pd.DataFrame()
+        input_master = pd.read_csv(DATA_FOLDER / "input_master.csv")
+        input_master.columns = input_master.columns.astype(str).str.strip()
+        input_master.drop(columns=["Unnamed: 0"], errors="ignore", inplace=True)
 
-        if aggregation == 'cluster':
-            input_df2 = input_master[input_master['lhz'] == cluster].dropna(axis=1, how='all')
-            units = [f'cluster_{cluster}']
-        else:
-            input_df2 = input_master.copy()
-            units = list(input_master['county'].unique())
+        if "date" in input_master.columns:
+            input_master.index = pd.to_datetime(input_master["date"])
+            input_master.drop(columns=["date"], inplace=True)
 
-        for county in units:
+        input_master["lead"] = pd.to_numeric(
+            input_master["lead"], errors="coerce"
+        ).fillna(0).astype(int)
+
+        cluster_list = ["p", "ap", "other"] if aggregation == "cluster" else ["no_cluster"]
+
+        for cluster in cluster_list:
+            eval_stats = []
+
+            df_cluster = (
+                input_master[input_master["lhz"] == cluster]
+                if aggregation == "cluster"
+                else input_master.copy()
+            )
+
             for lead in leads:
-                # Filter for lead time
-                input_df3 = input_df2[input_df2['lead'] == lead].sort_index()
-                if input_df3.empty: 
+                df = df_cluster[df_cluster["lead"] == lead].sort_index().copy()
+                if df.empty:
                     continue
 
-                # 1. SYNCHRONIZED CLEANING
-                input_df3 = input_df3.replace([np.inf, -np.inf], np.nan)
-                input_df3 = input_df3.dropna(subset=['FEWS_CS'])
-
-                if input_df3.empty:
-                    logger.warning(f"Skipping {county} Lead {lead}: No valid labels found.")
+                df = clean_scientific_brackets(df)
+                df = df.dropna(subset=["FEWS_CS"])
+                if df.empty:
                     continue
 
-                # 2. DEFINE LABELS AND FEATURES
-                labels = input_df3['FEWS_CS']
-                features = input_df3.drop(['lead', 'base_forecast', 'FEWS_CS'], axis=1, errors='ignore')
-                
-                cat_cols = features.select_dtypes(include=['object', 'category']).columns 
-                features.drop(cat_cols, axis=1, inplace=True)
-
-                # 3. Split
-                train_X, test_X, train_y, test_y = train_test_split(
-                    features, labels, test_size=traintest_ratio, shuffle=False
+                y = df["FEWS_CS"]
+                X = df.drop(
+                    ["lead", "base_forecast", "FEWS_CS", "county", "lhz"],
+                    axis=1,
+                    errors="ignore",
                 )
 
-                #####################################################################
-                # --- DYNAMIC HYPERPARAMETER LOADING ---
-                #####################################################################
-                hp_file_path = RESULTS_DIR / 'HP_results' / f"{aggregation}_{experiment}_{region}_{cluster}_{model_type}" / f"best_params_{model_type}_L{lead}.json"
-                defaults = {"n_estimators": 400, "max_depth": 4, "learning_rate": 0.01}
-                tuned_params = load_best_params(hp_file_path, defaults)
+                # ✅ NUMERIC-ONLY GUARANTEE
+                X = X.select_dtypes(include=[np.number]).astype(float)
 
-                if model_type == 'xgb':
-                    model_obj = XGBRegressor(**tuned_params, random_state=42)
-                else:
-                    model_obj = RandomForestRegressor(n_estimators=200, max_depth=4, random_state=42)
+                train_X, test_X, train_y, test_y = train_test_split(
+                    X, y, test_size=traintest_ratio, shuffle=False
+                )
 
-                # Fit
-                model_obj.fit(train_X, train_y)
-                preds = model_obj.predict(test_X)
+                hp_file = (
+                    HP_RESULT_ROOT
+                    / f"{aggregation}_{experiment}_{region}_{cluster}_{model_type}"
+                    / f"best_params_{model_type}_L{lead}.json"
+                )
 
-                #####################################################################
-                # --- EVALUATION & LOGGING ---
-                #####################################################################
-                mae = mean_absolute_error(test_y, preds)
-                rmse = np.sqrt(mean_squared_error(test_y, preds))
-                r2 = r2_score(test_y, preds)
+                params = load_best_params(
+                    hp_file,
+                    {"n_estimators": 400, "max_depth": 4, "learning_rate": 0.01},
+                )
 
-                # Store Stats
-                iter_stats = pd.DataFrame({
-                    'county': county, 'lead': lead, 'mae': mae, 'rmse': rmse, 'r2': r2
-                }, index=[0])
-                eval_stats = pd.concat([eval_stats, iter_stats])
+                model = XGBRegressor(**params, random_state=42)
+                model.fit(train_X, train_y)
+                preds = model.predict(test_X)
 
-                # SHAP Plots
-                explainer = shap.Explainer(model_obj)
-                shap_values = explainer(train_X)
-                fig, ax = plt.subplots()
-                shap.plots.bar(shap_values, show=False)
-                wandb.log({f"SHAP_{county}_L{lead}": wandb.Image(plt)})
-                plt.close(fig)
+                eval_stats.append(
+                    {
+                        "cluster": cluster,
+                        "lead": lead,
+                        "mae": mean_absolute_error(test_y, preds),
+                        "rmse": np.sqrt(mean_squared_error(test_y, preds)),
+                        "r2": r2_score(test_y, preds),
+                    }
+                )
 
-        # Save Final CSVs to GCS
-        stats_name = f'eval_stats_{aggregation}_{cluster}_{experiment}.csv'
-        eval_stats.to_csv(RESULTS_DIR / stats_name)
-        wandb.save(str(RESULTS_DIR / stats_name))
+                try:
+                    explainer = shap.TreeExplainer(model)
+                    # shap_vals = explainer.shap_values(train_X.sample(min(100, len(train_X))))
+                    # shap.summary_plot(shap_vals, train_X, plot_type="bar", show=False)
+                    shap_X = train_X.sample(min(100, len(train_X))).to_numpy(dtype=float)
 
-    wandb.finish()
+                    shap_vals = explainer.shap_values(shap_X)
 
-print("Execution finished. All results synced to GCS.")
+                    shap.summary_plot(
+                        shap_vals,
+                        features=shap_X,
+                        feature_names=train_X.columns,
+                        plot_type="bar",
+                        show=False,
+                    )
+
+                    wandb.log({f"SHAP_{cluster}_L{lead}": wandb.Image(plt)})
+                    plt.close()
+                except Exception as e:
+                    logger.warning(f"SHAP failed: {e}")
+
+            pd.DataFrame(eval_stats).to_csv(
+                RESULTS_DIR / f"eval_stats_{cluster}.csv", index=False
+            )
+
+        wandb.finish()
+
+
+if __name__ == "__main__":
+    run_ml_pipeline()

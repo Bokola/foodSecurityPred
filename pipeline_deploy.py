@@ -48,6 +48,9 @@ def drought_pipeline():
     # 1. Tuning Task: 4 CPUs and 16GB is balanced for Kenya-scoped data.
     tuning_task = hyperparameter_tuning_op()
     tuning_task.set_env_variable(name="WANDB_API_KEY", value=WANDB_API_KEY)
+    tuning_task.set_env_variable(
+    name="BUCKET_NAME",
+    value=f"gs://{BUCKET_NAME}")
     tuning_task.set_cpu_limit('4')
     tuning_task.set_memory_limit('16G')
     tuning_task.set_retry(num_retries=1) 
@@ -56,6 +59,9 @@ def drought_pipeline():
     # 2. Execution Task: Higher RAM (32G) allocated for memory-heavy SHAP values.
     execution_task = model_execution_op()
     execution_task.set_env_variable(name="WANDB_API_KEY", value=WANDB_API_KEY)
+    execution_task.set_env_variable(
+    name="BUCKET_NAME",
+    value=f"gs://{BUCKET_NAME}")
     execution_task.set_cpu_limit('8')
     execution_task.set_memory_limit('32G')
     execution_task.set_display_name("Model Training & XAI (Kenya)")
