@@ -67,6 +67,7 @@ jobs:
       - name: 'Run Pipeline Deploy Script'
         env:
           PROJECT_ID: ${{ env.PROJECT_ID }}
-          REGION: ${{ env.REGION }}
+          REGION: "us-central1"
+          WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
         run: |
           python pipeline_deploy.py
