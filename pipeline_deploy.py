@@ -2,9 +2,11 @@ import os
 from datetime import datetime
 from kfp import dsl, compiler
 from google.cloud import aiplatform
+import wandb
 
 # --- 1. Configuration ---
 # These are pulled from your GitHub Actions env block
+WANDB_API_KEY = os.getenv("WANDB_API_KEY")
 PROJECT_ID = os.getenv("PROJECT_ID")
 REGION = os.getenv("REGION", "us-central1")
 BUCKET_NAME = f"{PROJECT_ID}-drought-ml"
@@ -32,7 +34,13 @@ def model_execution_op():
     """
     return dsl.ContainerSpec(
         image=IMAGE_URI,
-        command=["python", "-m", "src.ML_execution"]
+        command=["python", "-m", "src.ML_execution"],
+        # pass api key
+        env ={
+            "WANDB_API_KEY": WANDB_API_KEY,
+            # Ensure the script knows where to save results so they persist
+            "AIP_CHECKPOINT_DIR": f"/gcs/{BUCKET_NAME.replace('gs://', '')}/output"
+        }
     )
 
 # --- 3. Define the Pipeline ---
