@@ -2,7 +2,6 @@ import os
 from datetime import datetime
 from kfp import dsl, compiler
 from google.cloud import aiplatform
-import wandb
 
 # --- 1. Configuration ---
 # These are pulled from your GitHub Actions env block
