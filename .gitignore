@@ -3,8 +3,8 @@ input_collector/
 local_test_env/
 gcp-steps.ini
 HP_results/
-ML_results/
 wandb/
+drought-forecasting-485308-drought-ml/
 
 
 # Byte-compiled / optimized / DLL files
