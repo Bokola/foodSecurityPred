@@ -20,7 +20,15 @@ logger = logging.getLogger(__name__)
 
 # --- PATHS (Vertex AI / GCS Compatible) ---
 BUCKET_NAME = os.getenv("BUCKET_NAME", "")
-BASE_DIR = Path(f"/gcs/{BUCKET_NAME}") if BUCKET_NAME else Path(os.getcwd())
+# BASE_DIR = Path(f"/gcs/{BUCKET_NAME}") if BUCKET_NAME else Path(os.getcwd())
+# Strip "gs://" or "gs:/" if it exists in the environment variable
+CLEAN_BUCKET = BUCKET_NAME.replace("gs://", "").replace("gs:/", "").strip("/")
+
+# Construct the mount path correctly
+if CLEAN_BUCKET:
+    BASE_DIR = Path(f"/gcs/{CLEAN_BUCKET}")
+else:
+    BASE_DIR = Path(os.getcwd())
 DATA_FOLDER = BASE_DIR / "input_collector"
 RESULTS_DIR = BASE_DIR / "ML_results"
 PLOTS_DIR = RESULTS_DIR / "plots"

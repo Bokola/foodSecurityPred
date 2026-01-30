@@ -22,7 +22,14 @@ logger = logging.getLogger(__name__)
 
 # Dynamic Path Resolution
 BUCKET_NAME = os.getenv("BUCKET_NAME")
-BASE_DIR = Path(f"/gcs/{BUCKET_NAME.replace('gs://', '')}") if BUCKET_NAME else Path(os.getcwd())
+# Strip "gs://" or "gs:/" if it exists in the environment variable
+CLEAN_BUCKET = BUCKET_NAME.replace("gs://", "").replace("gs:/", "").strip("/")
+
+# Construct the mount path correctly
+if CLEAN_BUCKET:
+    BASE_DIR = Path(f"/gcs/{CLEAN_BUCKET}")
+else:
+    BASE_DIR = Path(os.getcwd())
 DATA_FOLDER = BASE_DIR / "input_collector"
 HP_RESULT_ROOT = BASE_DIR / "HP_results"
 HP_RESULT_ROOT.mkdir(parents=True, exist_ok=True)
