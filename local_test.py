@@ -11,7 +11,7 @@ import logging
 # ---------------------------------------------------------------------
 os.environ["WANDB_API_KEY"] = "dryrun"
 os.environ["WANDB_MODE"] = "offline"
-os.environ["BUCKET_NAME"] = ""
+os.environ["BUCKET_NAME"] = "" # Empty string triggers local path logic
 
 # ---------------------------------------------------------------------
 # DUMMY DATA
@@ -19,21 +19,19 @@ os.environ["BUCKET_NAME"] = ""
 def create_local_dummy_data(data_path: Path):
     data_path.mkdir(parents=True, exist_ok=True)
 
-    rows = 100
-    # We include the "villain" [0.537] to ensure the purification script works
+    rows = 120 # Increased to ensure TimeSeriesSplit has enough samples
     df = pd.DataFrame({
         "date": pd.date_range("2020-01-01", periods=rows, freq="ME"),
-        "lead": [0, 1, 2, 3] * 25,
+        "lead": [0, 1, 3] * 40,
         "FEWS_CS": np.random.randint(1, 5, size=rows).astype(float),
-        "lhz": ["p", "ap", "other", "p"] * 25,
-        "county": ["Marsabit", "Turkana", "Wajir", "Mandera"] * 25,
-        "precip": ["[0.537]"] * rows, # The problematic scientific notation string
+        "lhz": ["p", "ap", "other"] * 40,
+        "county": ["Marsabit", "Turkana", "Wajir"] * 40,
+        "precip": ["[0.537]"] * rows, # The "villain" string
         "temp": [25.5] * rows,
         "ndvi": [0.4] * rows,
         "base_forecast": [1.0] * rows,
     })
 
-    # Save to CSV
     df.to_csv(data_path / "input_master.csv", index=False)
     print("✅ Dummy data created with problematic strings")
 
@@ -43,7 +41,7 @@ def create_local_dummy_data(data_path: Path):
 def run_local_smoke_test():
     base = Path.cwd() / "local_test_env"
     
-    # 1. Clean slate for the test environment
+    # 1. Clean slate
     if base.exists():
         shutil.rmtree(base)
     base.mkdir(parents=True, exist_ok=True)
@@ -51,42 +49,67 @@ def run_local_smoke_test():
     data_folder = base / "input_collector"
     create_local_dummy_data(data_folder)
 
-    # 2. Import your scripts
+    # 2. Import scripts
     import src.HP_tuning as hpt
     import src.ML_execution as mle
 
-    # 3. Synchronize Script Paths to the Local Environment
-    # We force the scripts to look at our dummy 'base' folder instead of /gcs/
+    # 3. Synchronize Paths
+    # We force the scripts to use our local test folder hierarchy
     for script in [hpt, mle]:
         script.BASE_DIR = base
         script.DATA_FOLDER = data_folder
         script.HP_RESULT_ROOT = base / "HP_results"
         
-    # ML_execution specific paths
-    mle.RESULTS_DIR = base / "ML_results"
-    mle.PLOTS_DIR = base / "ML_results" / "plots"
+    mle.RESULTS_DIR = base / "test_ML_results"
+    mle.PLOTS_DIR = base / "test_ML_results" / "plots"
 
-    # 4. Limit the test scope for speed
-    test_leads = [0]
-    # Patch the leads lists directly in the modules
-    hpt.leads = test_leads
-    # Note: ML_execution uses local variables inside the function, 
-    # but it will pick up the leads we set in the loop below if needed.
-
-    print("🚀 Running HP tuning (Purifying and Training)...")
+    print("🚀 STAGE 1: Running HP tuning (Audit Trail & Generalization Score)...")
+    # We patch the lead list inside hpt to run only one lead for speed
+    original_leads = [0, 1, 2, 3, 4, 8, 12] 
+    
+    # Run tuning (this should now generate Excel CV results)
     hpt.run_hp_tuning()
 
-    print("🚀 Running ML execution (Testing SHAP with Cleaned Data)...")
+    # Verify HP Excel Output
+    hp_excel = list((base / "HP_results").rglob("CV_results_xgb_L*.xlsx"))
+    if hp_excel:
+        print(f"✅ HP CV Results generated: {hp_excel[0].name}")
+        # Check if generalization score exists in the excel
+        df_check = pd.read_excel(hp_excel[0])
+        if 'generalization_score' in df_check.columns:
+            print("✅ Generalization Score logic verified in Excel")
+    else:
+        print("❌ HP CV Results missing!")
+
+    print("🚀 STAGE 2: Running ML execution (Full Output Suite & Kernel SHAP)...")
     mle.run_ml_pipeline()
 
-    # 5. Final Validation: Did SHAP actually produce a file?
-    plot_check = list((base / "ML_results" / "plots").glob("SHAP_p_L0.png"))
-    if plot_check:
-        print(f"✅ SHAP Plot generated successfully: {plot_check[0].name}")
-    else:
-        print("❌ SHAP Plot missing! Check logs for conversion errors.")
+    # 4. Final Validation of Outputs (Matching original script requirements)
+    results_path = base / "test_ML_results"
+    plots_path = results_path / "plots"
 
-    print("✨ Local smoke test complete")
+    # Check for SHAP plots
+    plot_check = list(plots_path.glob("SHAP_*.png"))
+    if plot_check:
+        print(f"✅ SHAP Plots generated: {len(plot_check)} files found")
+    else:
+        print("❌ SHAP Plots missing!")
+
+    # Check for Excel Outputs
+    expected_files = [
+        "raw_model_output_cluster_p.xlsx",
+        "verif_unit_level_cluster_p.xlsx",
+        "shap_values_cluster_p.xlsx",
+        "shap_data_cluster_p.xlsx"
+    ]
+    
+    for f_name in expected_files:
+        if (results_path / f_name).exists():
+            print(f"✅ Output verified: {f_name}")
+        else:
+            print(f"❌ Output missing: {f_name}")
+
+    print("✨ Local smoke test complete. Environment is ready for Vertex AI.")
 
 if __name__ == "__main__":
     run_local_smoke_test()

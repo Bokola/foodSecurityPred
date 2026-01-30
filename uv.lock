@@ -278,6 +278,15 @@ wheels = [
 ]
 
 [[package]]
+name = "colour"
+version = "0.1.5"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/a0/d4/5911a7618acddc3f594ddf144ecd8a03c29074a540f4494670ad8f153efe/colour-0.1.5.tar.gz", hash = "sha256:af20120fefd2afede8b001fbef2ea9da70ad7d49fafdb6489025dae8745c3aee", size = 24776, upload-time = "2017-11-19T23:20:08.015Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/74/46/e81907704ab203206769dee1385dc77e1407576ff8f50a0681d0a6b541be/colour-0.1.5-py2.py3-none-any.whl", hash = "sha256:33f6db9d564fadc16e59921a56999b79571160ce09916303d35346dddc17978c", size = 23772, upload-time = "2017-11-19T23:20:04.56Z" },
+]
+
+[[package]]
 name = "contextily"
 version = "1.7.0"
 source = { registry = "https://pypi.org/simple" }
@@ -469,12 +478,14 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "cartopy" },
+    { name = "colour" },
     { name = "geopandas" },
     { name = "geoplot" },
     { name = "geopy" },
     { name = "google-cloud" },
     { name = "google-cloud-aiplatform" },
     { name = "google-cloud-logging" },
+    { name = "here" },
     { name = "kfp" },
     { name = "mapclassify" },
     { name = "matplotlib" },
@@ -503,12 +514,14 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "cartopy", specifier = ">=0.21.0" },
+    { name = "colour", specifier = ">=0.1.5" },
     { name = "geopandas", specifier = ">=0.12.0" },
     { name = "geoplot", specifier = ">=0.5.1" },
     { name = "geopy", specifier = ">=2.4.1" },
     { name = "google-cloud", specifier = ">=0.34.0" },
     { name = "google-cloud-aiplatform", specifier = ">=1.134.0" },
     { name = "google-cloud-logging", specifier = ">=3.13.0" },
+    { name = "here", specifier = ">=1.4.1" },
     { name = "kfp", specifier = ">=2.15.2" },
     { name = "mapclassify", specifier = ">=2.10.0" },
     { name = "matplotlib", specifier = ">=3.8.0" },
@@ -967,6 +980,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/01/ee/02a2c011bdab74c6fb3c75474d40b3052059d95df7e73351460c8588d963/h11-0.16.0.tar.gz", hash = "sha256:4e35b956cf45792e4caa5885e69fba00bdbc6ffafbfa020300e549b208ee5ff1", size = 101250, upload-time = "2025-04-24T03:35:25.427Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/04/4b/29cac41a4d98d144bf5f6d33995617b185d14b22401f75ca86f384e87ff1/h11-0.16.0-py3-none-any.whl", hash = "sha256:63cf8bbe7522de3bf65932fda1d9c2772064ffb3dae62d55932da54b31cb6c86", size = 37515, upload-time = "2025-04-24T03:35:24.344Z" },
+]
+
+[[package]]
+name = "here"
+version = "1.4.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/bd/05/cc1de4b16a2ad0444c27283b6266b92dcfa271b2690b32ea6d6bc795e675/here-1.4.1.tar.gz", hash = "sha256:b969dc174d6879061699ff903ec37a63cddbfd07e2b74107bc7ef13449c65e23", size = 3192, upload-time = "2025-08-12T12:44:05.538Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/32/99/ec8a150569902ea0eb915d64c5b8f8f40c3679963e4f615066a34e36dc2e/here-1.4.1-py3-none-any.whl", hash = "sha256:3b1b24da7657b86a8a4fbbe40e68710e3a7950867ba52c7a1b8d6ea890a00ad3", size = 3053, upload-time = "2025-08-12T12:44:04.171Z" },
 ]
 
 [[package]]
