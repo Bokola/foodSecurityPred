@@ -5,7 +5,7 @@
 [![XGBoost](https://img.shields.io/badge/Model-XGBoost-EE4C2C?style=for-the-badge&logo=xgboost&logoColor=white)](https://xgboost.readthedocs.io/)
 [![GitHub Actions](https://img.shields.io/badge/CI%2FCD-GitHub_Actions-2088FF?style=for-the-badge&logo=github-actions&logoColor=white)](https://github.com/features/actions)
 
-An automated, cloud-native machine learning pipeline for regional drought forecasting. This system leverages **Gradient Boosted Trees** and **Automated MLOps** to predict drought severity (FEWS NET Classification) across specific regions with lead times ranging from 0 to 12 months.
+An automated, cloud-native machine learning pipeline for regional drought forecasting. This system leverages **Gradient Boosted Trees** and **Automated MLOps** to predict drought severity (FEWS NET Classification) across specific regions with lead times ranging from 0 to 12 months. The model was originally written by Tim Busker to run on a hosted HPC cluster. I re-wrote it to run on vertex AI.
 
 ---
 
