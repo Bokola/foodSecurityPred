@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 Created on Fri Jan  7 11:33:21 2022
 @author: Tim Busker 
@@ -15,39 +14,47 @@ import xarray as xr
 import regionmask
 from rasterio.enums import Resampling
 
-# Setup logging for the helper functions
+# Setup logging
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------
-# HELPER FUNCTIONS: PARAMETER I/O
+# HELPER FUNCTIONS: PARAMETER I/O (FIXED FOR VERTEX & SCIENTIFIC NOTATION)
 # ---------------------------------------------------------------------
 
 def save_best_params(params, path):
-    """Saves a dictionary of parameters to a JSON file."""
-    # Convert any numpy types to python types for JSON compatibility
-    clean_params = {}
-    for k, v in params.items():
-        if isinstance(v, (np.float32, np.float64)):
-            clean_params[k] = float(v)
-        elif isinstance(v, (np.int32, np.int64)):
-            clean_params[k] = int(v)
-        else:
-            clean_params[k] = v
-            
-    with open(path, 'w') as f:
-        json.dump(clean_params, f, indent=4)
-    print(f"--- Hyperparameters saved to {path} ---")
+    """Saves a dictionary of parameters to a JSON file; handles directories and numpy types."""
+    try:
+        # Vertex AI Fix: Ensure the directory exists before writing
+        output_path = Path(path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Convert any numpy types to python types for JSON compatibility
+        clean_params = {}
+        for k, v in params.items():
+            if isinstance(v, (np.float32, np.float64)):
+                clean_params[k] = float(v)
+            elif isinstance(v, (np.int32, np.int64)):
+                clean_params[k] = int(v)
+            else:
+                clean_params[k] = v
+                
+        with open(output_path, 'w') as f:
+            json.dump(clean_params, f, indent=4)
+        logger.info(f"✅ Hyperparameters saved to {path}")
+    except Exception as e:
+        logger.error(f"❌ Failed to save parameters to {path}: {e}")
 
 def load_best_params(path, default_params):
     """
     Loads parameters from JSON; returns defaults if file is missing.
     Includes an extra check to ensure base_score isn't a bracketed string.
     """
-    if Path(path).exists():
+    hp_path = Path(path)
+    if hp_path.exists():
         try:
-            with open(path, 'r') as f:
+            with open(hp_path, 'r') as f:
                 params = json.load(f)
-                print(f"--- Loading Hyperparameters from {path} ---")
+                logger.info(f"--- Loading Hyperparameters from {path} ---")
                 
                 # SANITY CHECK: If base_score is a string like "[5E-1]", clean it
                 if "base_score" in params and isinstance(params["base_score"], str):
@@ -56,14 +63,14 @@ def load_best_params(path, default_params):
                     
                 return params
         except Exception as e:
-            print(f"--- Error loading JSON: {e}. Using defaults. ---")
+            logger.error(f"--- Error loading JSON: {e}. Using defaults. ---")
             return default_params
             
-    print(f"--- HP file not found at {path}. Using default parameters. ---")
+    logger.warning(f"--- HP file not found at {path}. Using default parameters. ---")
     return default_params
 
 # ---------------------------------------------------------------------
-# GEOGRAPHICAL & RASTER FUNCTIONS
+# GEOGRAPHICAL & RASTER FUNCTIONS (ORIGINAL LOGIC)
 # ---------------------------------------------------------------------
 
 def rasterize_shp(input_shp, input_raster, resolution, upscaling_fac): 
