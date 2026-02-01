@@ -1,4 +1,17 @@
-# -*- coding: utf-8 -*-
+"""
+Created on Mon Jan 23 15:33:24 2023
+
+@author: Tim Busker 
+
+This script executes the machine learning models on the High Performance Cluster (HPC).
+It uses the input_data.csv file created by the input_collector.py and feature_engineering.py scripts. 
+Current implementation allows for a random forest model or an XGBoost model, on multiple spatial levels
+(county, country, livelihood zone, all). It was also tested whether the variation of FEWS IPC was
+ a good way of pooling the counties. This was not the case. 
+
+Reorganized for vertex AI environment by Basil Okola.
+
+"""
 import os
 import re
 import logging

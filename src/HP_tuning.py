@@ -3,6 +3,8 @@
 Drought Forecasting: Hyperparameter Tuning
 Optimized for: Vertex AI & Robustness against Metadata string errors.
 Includes: Generalization scoring and full CV result exports.
+
+Originally authored by Tim Busker and reorganized for vertex AI by Basil Okola.
 """
 
 import os
