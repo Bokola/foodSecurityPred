@@ -35,7 +35,7 @@ def drought_pipeline():
     tuning_task.set_env_variable(name="WANDB_API_KEY", value=WANDB_API_KEY)
     tuning_task.set_env_variable(name="BUCKET_NAME", value=f"gs://{BUCKET_NAME}")
     
-    # Resource Allocation
+    # KFP v2 Resource Allocation (No set_machine_type!)
     tuning_task.set_cpu_limit('4')
     tuning_task.set_memory_limit('16G')
     tuning_task.set_retry(num_retries=1) 
