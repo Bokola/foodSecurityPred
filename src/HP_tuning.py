@@ -18,19 +18,20 @@ from src.ML_functions import save_best_params
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-# --- PATHS (Vertex AI / GCS Compatible) ---
+# --- PATHS ---
 BUCKET_NAME = os.getenv("BUCKET_NAME", "")
 CLEAN_BUCKET = BUCKET_NAME.replace("gs://", "").replace("gs:/", "").strip("/")
 BASE_DIR = Path(f"/gcs/{CLEAN_BUCKET}") if CLEAN_BUCKET else Path(os.getcwd())
 DATA_FOLDER = BASE_DIR / "input_collector"
 HP_RESULT_ROOT = BASE_DIR / "HP_results"
 
-# --- DESIGN VARIABLES (Synchronized with oldML_execution) ---
+# --- DESIGN VARIABLES (Notebook Compatible) ---
 model_list = ['xgb']
 region_list = ['HOA'] 
 cluster_list = ['p', 'ap', 'other'] 
 experiment_list = ['RUN_FINAL_20']
 leads = [0, 1, 2, 3, 4, 8, 12]
+aggregation = 'cluster' 
 
 def clean_scientific_brackets(df):
     df = df.copy()
@@ -46,17 +47,20 @@ def clean_scientific_brackets(df):
 
 def run_hp_tuning():
     input_path = DATA_FOLDER / "input_master.csv"
+    if not input_path.exists():
+        logger.error(f"Input not found at {input_path}")
+        return
     input_master_raw = pd.read_csv(input_path, low_memory=False)
     input_master_raw = clean_scientific_brackets(input_master_raw)
 
     for experiment in experiment_list:
         for model_type in model_list:
             for region in region_list:
-                # Nesting folders by experiment and region to stay organized
-                hp_folder_root = HP_RESULT_ROOT / f"cluster_{experiment}_{region}_{model_type}"
+                # Directory structure matching the scenario logic
+                hp_folder_root = HP_RESULT_ROOT / f"{aggregation}_{experiment}_{region}_{model_type}"
+                hp_folder_root.mkdir(parents=True, exist_ok=True)
                 
                 for cluster in cluster_list:
-                    # Filter data by Region AND Cluster
                     df_cluster = input_master_raw.copy()
                     if region != 'HOA':
                         df_cluster = df_cluster[df_cluster['country'] == region]
@@ -66,7 +70,6 @@ def run_hp_tuning():
                         df = df_cluster[df_cluster["lead"] == lead].sort_index().copy()
                         if df.empty or len(df) < 10: continue
 
-                        # Encode country for HOA global training
                         if region == 'HOA':
                             df = pd.get_dummies(df, columns=['country'], prefix='country')
 
@@ -75,7 +78,6 @@ def run_hp_tuning():
                         X = df.drop(columns=[target_col, "lead", "base_forecast", "county", "lhz", "date", "Unnamed0", "country"], errors="ignore")
                         X = X.select_dtypes(include=[np.number]).astype(np.float64)
 
-                        # Tuning setup
                         tscv = TimeSeriesSplit(n_splits=3)
                         param_grid = {"max_depth": [3, 4, 6], "learning_rate": [0.01, 0.05], "n_estimators": [200, 400]}
                         
@@ -83,7 +85,6 @@ def run_hp_tuning():
                         logger.info(f"🚀 Tuning: {region} | {cluster} | Lead {lead}")
                         grid.fit(X, y)
 
-                        # Save using the helper function from ML_functions
                         save_best_params(grid.best_params_, hp_folder_root / f"best_params_{model_type}_L{lead}.json")
 
 if __name__ == "__main__":

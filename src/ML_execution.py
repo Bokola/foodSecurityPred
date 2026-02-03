@@ -22,7 +22,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from pathlib import Path
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from sklearn.metrics import mean_absolute_error, mean_squared_error
 from xgboost import XGBRegressor
 import shap
 import wandb
@@ -31,7 +31,7 @@ from src.ML_functions import load_best_params
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-# --- PATHS (Vertex AI / GCS Compatible) ---
+# --- PATHS ---
 BUCKET_NAME = os.getenv("BUCKET_NAME", "")
 CLEAN_BUCKET = BUCKET_NAME.replace("gs://", "").replace("gs:/", "").strip("/")
 BASE_DIR = Path(f"/gcs/{CLEAN_BUCKET}") if CLEAN_BUCKET else Path(os.getcwd())
@@ -40,22 +40,13 @@ RESULTS_DIR = BASE_DIR / "ML_results"
 PLOTS_DIR = RESULTS_DIR / "plots"
 HP_RESULT_ROOT = BASE_DIR / "HP_results"
 
-# --- DESIGN VARIABLES (The Full Matrix) ---
+# --- DESIGN VARIABLES ---
 model_list = ['xgb']
-region_list = ['HOA']  # Includes Kenya, Ethiopia, Somalia
+region_list = ['HOA'] 
 experiment_list = ['RUN_FINAL_20']
-# We need to run for each cluster type
 cluster_list = ['p', 'ap', 'other'] 
 leads = [0, 1, 2, 3, 4, 8, 12]
-
-# Matrix including Experiment, Model, Region, and Cluster
-design_variables = [
-    (exp, model, reg, cluster) 
-    for exp in experiment_list 
-    for model in model_list 
-    for reg in region_list
-    for cluster in cluster_list
-]
+aggregation = 'cluster'
 
 def clean_scientific_brackets(df):
     df = df.copy()
@@ -81,82 +72,96 @@ def run_ml_pipeline():
     input_master_raw = pd.read_csv(input_path, low_memory=False)
     input_master_raw = clean_scientific_brackets(input_master_raw)
 
-    for experiment, model_type, region, cluster in design_variables:
-        # Initialize W&B run for this specific combination
-        run_name = f"{experiment}_{region}_{cluster}_{model_type}"
-        wandb.init(project="drought_forecasting", name=run_name, reinit=True)
-        
-        # Filtering by Region AND Cluster
-        df_run = input_master_raw.copy()
-        if region != 'HOA':
-            df_run = df_run[df_run['country'] == region]
-        df_run = df_run[df_run['lhz'] == cluster]
+    for experiment in experiment_list:
+        for model_type in model_list:
+            for region in region_list:
+                for cluster in cluster_list:
+                    # Construct scenario name for notebook compatibility
+                    scenario = f"{aggregation}_{experiment}_{region}_{cluster}"
+                    wandb.init(project="drought_forecasting", name=scenario, reinit=True)
+                    
+                    df_run = input_master_raw.copy()
+                    if region != 'HOA':
+                        df_run = df_run[df_run['country'] == region]
+                    df_run = df_run[df_run['lhz'] == cluster]
 
-        preds_storage = pd.DataFrame()
-        eval_stats = pd.DataFrame()
+                    preds_storage = pd.DataFrame()
+                    eval_stats = pd.DataFrame()
+                    feat_imp_storage = pd.DataFrame()
+                    
+                    # SHAP masters for this specific scenario/cluster
+                    shap_values_all, shap_data_all, shap_base_all = [], [], []
 
-        for lead in leads:
-            df = df_run[df_run["lead"] == lead].sort_index().copy()
-            if df.empty or len(df) < 5: continue
-            
-            # One-hot encode country if multiple countries exist in this cluster
-            if region == 'HOA':
-                df = pd.get_dummies(df, columns=['country'], prefix='country', prefix_sep='_')
+                    for lead in leads:
+                        df = df_run[df_run["lead"] == lead].sort_index().copy()
+                        if df.empty or len(df) < 5: continue
+                        
+                        if region == 'HOA':
+                            df = pd.get_dummies(df, columns=['country'], prefix='country')
 
-            target_col = "FEWSCS" if "FEWSCS" in df.columns else "FEWS_CS"
-            y = pd.to_numeric(df[target_col], errors="coerce").fillna(0.0).astype(np.float64)
-            X = df.drop(columns=[target_col, "lead", "base_forecast", "county", "lhz", "date", "Unnamed0", "country"], errors="ignore")
-            X = X.select_dtypes(include=[np.number]).astype(np.float64).fillna(0.0)
+                        target_col = "FEWSCS" if "FEWSCS" in df.columns else "FEWS_CS"
+                        y = pd.to_numeric(df[target_col], errors="coerce").fillna(0.0).astype(np.float64)
+                        X = df.drop(columns=[target_col, "lead", "base_forecast", "county", "lhz", "date", "Unnamed0", "country"], errors="ignore")
+                        X = X.select_dtypes(include=[np.number]).astype(np.float64).fillna(0.0)
 
-            train_X, test_X, train_y, test_y = train_test_split(X, y, test_size=0.2, shuffle=False)
-            
-            # HP folder path matching the original nested naming convention
-            hp_path = HP_RESULT_ROOT / f"cluster_{experiment}_{region}_{model_type}" / f"best_params_{model_type}_L{lead}.json"
-            params = load_best_params(hp_path, {"n_estimators": 200, "max_depth": 4, "learning_rate": 0.01})
-            
-            model = XGBRegressor(**params, random_state=42, objective="reg:squarederror")
-            model.fit(train_X, train_y)
+                        train_X, test_X, train_y, test_y = train_test_split(X, y, test_size=0.2, shuffle=False)
+                        
+                        hp_path = HP_RESULT_ROOT / f"{aggregation}_{experiment}_{region}_{model_type}" / f"best_params_{model_type}_L{lead}.json"
+                        params = load_best_params(hp_path, {"n_estimators": 200, "max_depth": 4, "learning_rate": 0.01})
+                        
+                        model = XGBRegressor(**params, random_state=42)
+                        model.fit(train_X, train_y)
 
-            # Predictions & Logging
-            preds = model.predict(test_X)
-            mae, rmse = mean_absolute_error(test_y, preds), np.sqrt(mean_squared_error(test_y, preds))
-            wandb.log({f"L{lead}/mae": mae, f"L{lead}/rmse": rmse})
+                        preds = model.predict(test_X)
+                        
+                        # Store prediction data (columns must match notebook expectations)
+                        p_data = pd.DataFrame({
+                            'observed': test_y.values, 
+                            'prediction': preds, 
+                            'base1_preds': df.loc[test_X.index, 'observed_previous_IPC'].values if 'observed_previous_IPC' in df.columns else test_y.values,
+                            'base2_preds': df.loc[test_X.index, 'observed_previous_year_IPC'].values if 'observed_previous_year_IPC' in df.columns else test_y.values,
+                            'FEWS_prediction': df.loc[test_X.index, 'FEWS_prediction'].values if 'FEWS_prediction' in df.columns else np.nan,
+                            'lead': lead, 
+                            'county': df.loc[test_X.index, 'county'].values,
+                            'cluster': cluster
+                        }, index=test_X.index)
+                        preds_storage = pd.concat([preds_storage, p_data])
 
-            # Store results
-            p_data = pd.DataFrame({
-                'observed': test_y.values, 'prediction': preds, 
-                'lead': lead, 'county': df.loc[test_X.index, 'county'].values,
-                'cluster': cluster, 'region': region
-            }, index=test_X.index)
-            preds_storage = pd.concat([preds_storage, p_data])
-            eval_stats = pd.concat([eval_stats, pd.DataFrame({'lead': [lead], 'mae': [mae], 'rmse': [rmse]})])
+                        # Feature Importance
+                        fi = pd.DataFrame({'feature': X.columns, 'importance': model.feature_importances_, 'lead': lead, 'cluster': cluster})
+                        feat_imp_storage = pd.concat([feat_imp_storage, fi])
 
-            # SHAP (Fidelity=100)
-            try:
-                bg = train_X.sample(min(len(train_X), 100))
-                explainer = shap.KernelExplainer(model.predict, bg)
-                shap_vals = explainer.shap_values(test_X.sample(min(len(test_X), 100)), nsamples=500, silent=True)
-                
-                fig = plt.figure(figsize=(10, 6))
-                shap.summary_plot(shap_vals, features=test_X.sample(min(len(test_X), 100)), show=False)
-                plt.title(f"SHAP: {region}-{cluster} L{lead}")
-                plot_path = PLOTS_DIR / f"SHAP_{region}_{cluster}_L{lead}.png"
-                plt.savefig(plot_path, bbox_inches='tight')
-                wandb.log({f"plots/SHAP_L{lead}": wandb.Image(str(plot_path))})
-                plt.close(fig)
-            except Exception as e:
-                logger.error(f"SHAP failed for {cluster} L{lead}: {e}")
+                        # SHAP logic
+                        try:
+                            bg = train_X.sample(min(len(train_X), 100))
+                            explainer = shap.KernelExplainer(model.predict, bg)
+                            sample_test_X = test_X.sample(min(len(test_X), 100))
+                            shap_vals = explainer.shap_values(sample_test_X, nsamples=500, silent=True)
+                            
+                            sv_df = pd.DataFrame(shap_vals, columns=sample_test_X.columns, index=sample_test_X.index)
+                            sv_df['lead'] = lead
+                            shap_values_all.append(sv_df)
+                            
+                            sd_df = sample_test_X.copy()
+                            sd_df['lead'] = lead
+                            shap_data_all.append(sd_df)
+                            
+                            sb_df = pd.DataFrame({'base_value': [explainer.expected_value]}, index=[lead])
+                            shap_base_all.append(sb_df)
+                        except Exception as e:
+                            logger.error(f"SHAP failed for {cluster} L{lead}: {e}")
 
-        # Save Excel files with distinct naming
-        file_suffix = f"{experiment}_{region}_{cluster}_{model_type}"
-        preds_storage.to_excel(RESULTS_DIR / f"preds_{file_suffix}.xlsx")
-        eval_stats.to_excel(RESULTS_DIR / f"stats_{file_suffix}.xlsx")
-        
-        # Log to W&B
-        artifact = wandb.Artifact(name=f"outputs_{region}_{cluster}", type="results")
-        artifact.add_file(str(RESULTS_DIR / f"preds_{file_suffix}.xlsx"))
-        wandb.log_artifact(artifact)
-        wandb.finish()
+                    # Export using exact names found in plots_paper.ipynb Cell 5 and Cell 26
+                    if not preds_storage.empty:
+                        preds_storage.to_excel(RESULTS_DIR / f"raw_model_output_{scenario}.xlsx")
+                        feat_imp_storage.to_excel(RESULTS_DIR / f"feature_importances_{scenario}.xlsx")
+                        
+                        if shap_values_all:
+                            pd.concat(shap_values_all).to_excel(RESULTS_DIR / f"shap_values_{scenario}.xlsx")
+                            pd.concat(shap_data_all).to_excel(RESULTS_DIR / f"shap_data_{scenario}.xlsx")
+                            pd.concat(shap_base_all).to_excel(RESULTS_DIR / f"shap_base_values_{scenario}.xlsx")
+                    
+                    wandb.finish()
 
 if __name__ == "__main__":
     run_ml_pipeline()
