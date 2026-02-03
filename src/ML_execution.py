@@ -11,57 +11,74 @@ Current implementation allows for a random forest model or an XGBoost model, on 
 
 Reorganized for vertex AI environment by Basil Okola.
 """
-
 import os
 import re
 import logging
 import pandas as pd
 import numpy as np
+import shap
+import wandb
 from pathlib import Path
 from sklearn.model_selection import train_test_split
 from xgboost import XGBRegressor
-import shap
-import wandb
 from src.ML_functions import load_best_params
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-# --- PATHS ---
-BUCKET_NAME = os.getenv("BUCKET_NAME", "")
-CLEAN_BUCKET = BUCKET_NAME.replace("gs://", "").replace("gs:/", "").strip("/")
-BASE_DIR = Path(f"/gcs/{CLEAN_BUCKET}") if CLEAN_BUCKET else Path(os.getcwd())
-DATA_FOLDER = BASE_DIR / "input_collector"
-RESULTS_DIR = BASE_DIR / "ML_results"
-HP_RESULT_ROOT = BASE_DIR / "HP_results"
-
-# --- CONFIG ---
-leads = [0, 1, 2, 3, 4, 8, 12]
-cluster_list = ['p', 'ap', 'other']
-experiment = 'RUN_FINAL_20'
-region = 'HOA'
-aggregation = 'cluster'
-
 def nuclear_clean(df):
+    """Standardized cleaning to ensure lowercase names and recovered metadata."""
     df = df.copy()
-    df.columns = [re.sub(r'[^a-zA-Z0-9_]', '', str(c).replace("[", "").replace("]", "").strip()) for c in df.columns]
-    meta = {"county", "lhz", "date", "lead", "country", "FEWSCS", "FEWS_CS", "Unnamed0"}
+    # Clean headers and force lowercase
+    df.columns = [re.sub(r'[^a-zA-Z0-9_]', '', str(c).replace("[", "").replace("]", "").strip()).lower() for c in df.columns]
+    
+    # Map all possible variations to the names the execution loop expects
+    rename_map = {
+        "fews_cs": "fewscs", 
+        "unnamed0": "date", 
+        "unnamed_0": "date", 
+        "time": "date",
+        "datetime": "date"
+    }
+    df = df.rename(columns=rename_map)
+    
+    # If 'date' is still missing, treat the first column as date
+    if 'date' not in df.columns and len(df.columns) > 0:
+        if df.columns[0].startswith('unnamed'):
+            df = df.rename(columns={df.columns[0]: 'date'})
+    
+    # Clean numeric data (handle bracketed strings like [1.2])
+    meta = {"county", "lhz", "date", "lead", "country", "fewscs"}
     for col in df.columns:
         if col not in meta:
             df[col] = pd.to_numeric(df[col].astype(str).str.replace(r'[\[\]\s]', '', regex=True), errors='coerce')
+    
     numeric_cols = df.select_dtypes(include=[np.number]).columns
     df[numeric_cols] = df[numeric_cols].fillna(0.0).astype(np.float64)
     return df
 
 def run_ml_pipeline():
+    # --- Paths Configuration ---
+    BUCKET_NAME = os.getenv("BUCKET_NAME", "").replace("gs://", "").strip("/")
+    BASE_DIR = Path(f"/gcs/{BUCKET_NAME}") if BUCKET_NAME else Path(os.getcwd())
+    DATA_FOLDER = BASE_DIR / "input_collector"
+    RESULTS_DIR = BASE_DIR / "ML_results"
+    HP_RESULT_ROOT = BASE_DIR / "HP_results"
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+
     input_path = DATA_FOLDER / "input_master.csv"
-    if not input_path.exists(): return
+    if not input_path.exists():
+        logger.error(f"Input not found: {input_path}")
+        return
+
     df_master = nuclear_clean(pd.read_csv(input_path, low_memory=False))
 
+    leads = [0, 1, 2, 3, 4, 8, 12]
+    cluster_list = df_master['lhz'].unique()
+
     for cluster in cluster_list:
-        scenario = f"{aggregation}_{experiment}_{region}_{cluster}"
-        logger.info(f"Processing: {scenario}")
+        # Match the scenario name used in the notebook
+        scenario = f"cluster_RUN_FINAL_20_HOA_{cluster}"
         wandb.init(project="drought_forecasting", name=scenario, reinit=True)
         
         df_c = df_master[df_master['lhz'] == cluster].copy()
@@ -69,67 +86,66 @@ def run_ml_pipeline():
 
         for lead in leads:
             df_l = df_c[df_c["lead"] == lead].sort_index().copy()
-            if len(df_l) < 5: continue
+            if len(df_l) < 10: continue
             
-            target = "FEWSCS" if "FEWSCS" in df_l.columns else "FEWS_CS"
-            X_df = df_l.drop(columns=[target, "lead", "base_forecast", "county", "lhz", "date", "Unnamed0", "country"], errors="ignore").select_dtypes(include=[np.number])
+            # 1. Isolate Metadata before dropping columns
+            idx_split = int(len(df_l) * 0.8)
+            meta_test = df_l.iloc[idx_split:].copy()
             
+            # 2. Prepare Training Data (Lowercase references)
+            target = "fewscs"
+            drop_cols = ["fewscs", "lead", "county", "lhz", "date", "country", "base_forecast", "unnamed0"]
+            
+            X_df = df_l.drop(columns=[c for c in drop_cols if c in df_l.columns], errors="ignore").select_dtypes(include=[np.number])
             X_np = X_df.values.astype(np.float64)
             y_np = df_l[target].values.astype(np.float64)
+            
             train_X, test_X, train_y, test_y = train_test_split(X_np, y_np, test_size=0.2, shuffle=False)
             
-            hp_path = HP_RESULT_ROOT / f"{aggregation}_{experiment}_{region}_xgb" / f"best_params_xgb_L{lead}.json"
-            params = load_best_params(hp_path, {"n_estimators": 200, "max_depth": 4, "learning_rate": 0.01})
+            # 3. Load Tuning Results
+            hp_path = HP_RESULT_ROOT / "cluster_RUN_FINAL_20_HOA_xgb" / f"best_params_xgb_L{lead}.json"
+            params = load_best_params(hp_path, {"n_estimators": 200, "max_depth": 4, "learning_rate": 0.05})
             
-            model = XGBRegressor(**params, random_state=42)
+            model = XGBRegressor(**params)
             model.fit(train_X, train_y)
 
-            # --- Predictions ---
-            p = model.predict(test_X)
-            idx = df_l.index[int(len(df_l)*0.8):]
+            # 4. Predictions
+            preds = model.predict(test_X)
             preds_all.append(pd.DataFrame({
-                'date': df_l.loc[idx, 'date'].values,
-                'observed': test_y, 'prediction': p, 'lead': lead,
-                'county': df_l.loc[idx, 'county'].values, 'cluster': cluster
+                'date': meta_test['date'].values,
+                'observed': test_y,
+                'prediction': preds,
+                'lead': lead,
+                'county': meta_test['county'].values,
+                'cluster': cluster
             }))
 
-            # --- THE FINAL SHAP SOLUTION: KERNEL EXPLAINER ---
+            # 5. Kernel SHAP for XAI (Unified File Names)
             try:
-                # 1. Use raw slice for background (immune to kmeans/indexing errors)
-                background = train_X[:10] if len(train_X) > 10 else train_X
-                
-                # 2. KernelExplainer is a black-box. It NEVER looks at XGBoost C++ strings.
-                explainer = shap.KernelExplainer(model.predict, background)
-                
-                # 3. Calculate values (returns a list of arrays or a single array)
+                bg = train_X[:10] if len(train_X) > 10 else train_X
+                explainer = shap.KernelExplainer(model.predict, bg)
                 sv = explainer.shap_values(test_X)
-                
-                # Handle multi-output return format just in case
                 if isinstance(sv, list): sv = sv[0]
                 
-                meta = df_l.loc[idx, ['county', 'date', 'lead', 'lhz']].reset_index(drop=True)
-                shap_v.append(pd.concat([meta, pd.DataFrame(sv, columns=X_df.columns)], axis=1))
-                shap_d.append(pd.concat([meta, pd.DataFrame(test_X, columns=X_df.columns)], axis=1))
+                # Metadata for SHAP files
+                m_df = meta_test[['county', 'date', 'lead', 'lhz']].reset_index(drop=True)
                 
-                # Base value is a simple scalar in KernelExplainer
-                shap_b.append(pd.DataFrame({
-                    'base_value': [float(explainer.expected_value)], 
-                    'lead': [lead]
-                }))
-                
+                shap_v.append(pd.concat([m_df, pd.DataFrame(sv, columns=X_df.columns)], axis=1))
+                shap_d.append(pd.concat([m_df, pd.DataFrame(test_X, columns=X_df.columns)], axis=1))
+                shap_b.append(pd.DataFrame({'base_value': [float(explainer.expected_value)], 'lead': [lead]}))
             except Exception as e:
-                logger.error(f"SHAP failed at {cluster} L{lead}: {e}")
+                logger.warning(f"SHAP failed: {e}")
 
-        # --- EXPORTS (Exactly as Plots Notebook expects) ---
+        # --- Save Final Outputs with Notebook-Matched Names ---
         if preds_all:
-            out_preds = pd.concat(preds_all).set_index('date')
-            out_preds.to_excel(RESULTS_DIR / f"raw_model_output_{scenario}.xlsx")
+            pd.concat(preds_all).set_index('date').to_excel(RESULTS_DIR / f"raw_model_output_{scenario}.xlsx")
+            
             if shap_v:
-                v_df = pd.concat(shap_v)
-                v_df.to_excel(RESULTS_DIR / f"feature_importances_{scenario}.xlsx")
-                v_df.to_excel(RESULTS_DIR / f"shap_values_{scenario}.xlsx")
-                pd.concat(shap_d).to_excel(RESULTS_DIR / f"shap_data_{scenario}.xlsx")
-                pd.concat(shap_b).to_excel(RESULTS_DIR / f"shap_base_values_{scenario}.xlsx")
+                pd.concat(shap_v).to_excel(RESULTS_DIR / f"feature_importances_{scenario}.xlsx", index=False)
+                pd.concat(shap_v).to_excel(RESULTS_DIR / f"shap_values_{scenario}.xlsx", index=False)
+                pd.concat(shap_d).to_excel(RESULTS_DIR / f"shap_data_{scenario}.xlsx", index=False)
+                pd.concat(shap_b).to_excel(RESULTS_DIR / f"shap_base_values_{scenario}.xlsx", index=False)
+        
         wandb.finish()
 
 if __name__ == "__main__":

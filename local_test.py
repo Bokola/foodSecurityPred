@@ -8,6 +8,11 @@ import pandas as pd
 import numpy as np
 from pathlib import Path
 
+# Add the 'src' directory to the system path so Python can find the modules
+src_path = os.path.join(os.getcwd(), 'src')
+if src_path not in sys.path:
+    sys.path.insert(0, src_path)
+
 # Mock Environment
 os.environ["WANDB_MODE"] = "offline"
 os.environ["BUCKET_NAME"] = "" 
@@ -44,7 +49,7 @@ def run_test():
 
     mle.RESULTS_DIR = base / "ML_results"
 
-    hpt.run_hp_tuning()
+    hpt.run_tuning()
     mle.run_ml_pipeline()
 
     # Verification
