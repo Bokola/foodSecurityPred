@@ -25,22 +25,31 @@ BASE_DIR = Path(f"/gcs/{CLEAN_BUCKET}") if CLEAN_BUCKET else Path(os.getcwd())
 DATA_FOLDER = BASE_DIR / "input_collector"
 HP_RESULT_ROOT = BASE_DIR / "HP_results"
 
-# --- DESIGN VARIABLES ---
-model_list = ['xgb']
-region_list = ['HOA'] 
-cluster_list = ['p', 'ap', 'other'] 
-experiment_list = ['RUN_FINAL_20']
+# --- CONFIG ---
 leads = [0, 1, 2, 3, 4, 8, 12]
-aggregation = 'cluster' 
+cluster_list = ['p', 'ap', 'other']
+experiment = 'RUN_FINAL_20'
+region = 'HOA'
+aggregation = 'cluster'
 
-def clean_scientific_brackets(df):
+def nuclear_clean(df):
+    """
+    Identical cleaning logic to ML_execution.py.
+    Removes brackets from headers and values to ensure feature consistency.
+    """
     df = df.copy()
+    # 1. Clean headers: [precip] -> precip
     df.columns = [re.sub(r'[^a-zA-Z0-9_]', '', str(c).replace("[", "").replace("]", "").strip()) for c in df.columns]
-    cols_to_skip = {"county", "lhz", "base_forecast", "FEWS_CS", "FEWSCS", "date", "Unnamed0", "lead", "country"}
+    
+    meta = {"county", "lhz", "date", "lead", "country", "FEWSCS", "FEWS_CS", "Unnamed0"}
     for col in df.columns:
-        if col in cols_to_skip: continue
-        cleaned = df[col].astype(str).str.replace(r'[^0-9.eE\-]', '', regex=True)
-        df[col] = pd.to_numeric(cleaned, errors="coerce")
+        if col not in meta:
+            # 2. Clean values: [2.65E0] -> 2.65
+            df[col] = pd.to_numeric(
+                df[col].astype(str).str.replace(r'[\[\]\s]', '', regex=True), 
+                errors='coerce'
+            )
+    
     numeric_cols = df.select_dtypes(include=[np.number]).columns
     df[numeric_cols] = df[numeric_cols].fillna(0.0).astype(np.float64)
     return df
@@ -48,41 +57,58 @@ def clean_scientific_brackets(df):
 def run_hp_tuning():
     input_path = DATA_FOLDER / "input_master.csv"
     if not input_path.exists():
-        logger.error(f"Input not found at {input_path}")
+        logger.error(f"Input file not found at {input_path}")
         return
-    input_master_raw = pd.read_csv(input_path, low_memory=False)
-    input_master_raw = clean_scientific_brackets(input_master_raw)
 
-    for experiment in experiment_list:
-        for model_type in model_list:
-            for region in region_list:
-                hp_folder_root = HP_RESULT_ROOT / f"{aggregation}_{experiment}_{region}_{model_type}"
-                hp_folder_root.mkdir(parents=True, exist_ok=True)
-                
-                for cluster in cluster_list:
-                    df_cluster = input_master_raw.copy()
-                    if region != 'HOA':
-                        df_cluster = df_cluster[df_cluster['country'] == region]
-                    df_cluster = df_cluster[df_cluster['lhz'] == cluster]
+    # Load and Clean
+    df_all = nuclear_clean(pd.read_csv(input_path, low_memory=False))
 
-                    for lead in leads:
-                        df = df_cluster[df_cluster["lead"] == lead].sort_index().copy()
-                        if df.empty or len(df) < 10: continue
+    hp_folder = HP_RESULT_ROOT / f"{aggregation}_{experiment}_{region}_xgb"
+    hp_folder.mkdir(parents=True, exist_ok=True)
 
-                        if region == 'HOA':
-                            df = pd.get_dummies(df, columns=['country'], prefix='country')
+    for cluster in cluster_list:
+        df_c = df_all[df_all['lhz'] == cluster]
+        
+        for lead in leads:
+            df = df_c[df_c["lead"] == lead].sort_index().copy()
+            if len(df) < 10:
+                continue
 
-                        target_col = "FEWSCS" if "FEWSCS" in df.columns else "FEWS_CS"
-                        y = df[target_col].fillna(0.0).astype(np.float64)
-                        X = df.drop(columns=[target_col, "lead", "base_forecast", "county", "lhz", "date", "Unnamed0", "country"], errors="ignore")
-                        X = X.select_dtypes(include=[np.number]).astype(np.float64)
+            target = "FEWSCS" if "FEWSCS" in df.columns else "FEWS_CS"
+            drop_cols = [target, "lead", "base_forecast", "county", "lhz", "date", "Unnamed0", "country"]
+            
+            X = df.drop(columns=[c for c in drop_cols if c in df.columns], errors="ignore")
+            X = X.select_dtypes(include=[np.number]).astype(np.float64)
+            y = df[target].astype(np.float64)
 
-                        tscv = TimeSeriesSplit(n_splits=3)
-                        param_grid = {"max_depth": [3, 4, 6], "learning_rate": [0.01, 0.05], "n_estimators": [200, 400]}
-                        
-                        grid = GridSearchCV(XGBRegressor(random_state=42), param_grid, cv=tscv, scoring="neg_mean_absolute_error", n_jobs=-1)
-                        grid.fit(X, y)
-                        save_best_params(grid.best_params_, hp_folder_root / f"best_params_{model_type}_L{lead}.json")
+            # --- PRE-EMPTIVE BASE_SCORE FIX ---
+            # We calculate a clean float mean to prevent XGBoost from 
+            # auto-generating the bracketed string [2.5E0] during CV.
+            clean_mean = float(np.mean(y))
+            
+            model = XGBRegressor(base_score=clean_mean, random_state=42)
+            
+            # Grid Search
+            param_grid = {
+                "max_depth": [3, 4, 6],
+                "learning_rate": [0.01, 0.05],
+                "n_estimators": [200, 400]
+            }
+            
+            tscv = TimeSeriesSplit(n_splits=3)
+            grid = GridSearchCV(
+                model, 
+                param_grid, 
+                cv=tscv, 
+                scoring="neg_mean_absolute_error", 
+                n_jobs=-1
+            )
+            
+            logger.info(f"Tuning {cluster} Lead {lead}...")
+            grid.fit(X, y)
+            
+            # Save results
+            save_best_params(grid.best_params_, hp_folder / f"best_params_xgb_L{lead}.json")
 
 if __name__ == "__main__":
     run_hp_tuning()

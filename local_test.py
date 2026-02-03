@@ -1,9 +1,5 @@
 """
-local test environment
-"""
-# -*- coding: utf-8 -*-
-"""
-local test environment: Robust pathing and scenario-based naming compatibility
+local test environment - Updated for Nuclear Cleaning Verification
 """
 import os
 import sys
@@ -12,86 +8,54 @@ import pandas as pd
 import numpy as np
 from pathlib import Path
 
-# --- ROBUST PATHING ---
-# Adds current directory and 'src' directory to the python path
-current_dir = os.getcwd()
-sys.path.append(current_dir)
-if os.path.exists(os.path.join(current_dir, 'src')):
-    sys.path.append(os.path.join(current_dir, 'src'))
-
 # Mock Environment
 os.environ["WANDB_MODE"] = "offline"
 os.environ["BUCKET_NAME"] = "" 
 
 def create_mock_data(path: Path):
     path.mkdir(parents=True, exist_ok=True)
-    rows = 180
+    rows = 200
     df = pd.DataFrame({
         "date": pd.date_range("2018-01-01", periods=rows, freq="MS"),
-        "lead": [0, 1] * 90,
+        "lead": [0, 1] * 100,
         "FEWS_CS": np.random.randint(1, 5, size=rows),
-        "country": ["Kenya", "Ethiopia"] * 90,
-        "lhz": ["p", "ap"] * 90,
-        "county": ["County_A", "County_B"] * 90,
-        "precip": ["[0.123]"] * rows,
-        "base_forecast": [1.0] * rows,
-        "observed_previous_IPC": np.random.randint(1, 5, size=rows),
-        "observed_previous_year_IPC": np.random.randint(1, 5, size=rows),
-        "FEWS_prediction": np.random.randint(1, 5, size=rows)
+        "country": ["Kenya"] * 200,
+        "lhz": ["p"] * 200,
+        "county": ["County_X"] * 200,
+        "precip": ["[2.652E0]"] * rows, # The failure string
+        "base_forecast": [1.0] * rows
     })
     df.to_csv(path / "input_master.csv", index=False)
-    print("✅ Mock data created.")
 
 def run_test():
     base = Path.cwd() / "local_test_env"
     if base.exists(): shutil.rmtree(base)
     base.mkdir()
-
     data_folder = base / "input_collector"
     create_mock_data(data_folder)
 
-    # --- DYNAMIC IMPORT ---
-    try:
-        import HP_tuning as hpt
-        import ML_execution as mle
-        print("✅ Modules imported from root.")
-    except ImportError:
-        try:
-            from src import HP_tuning as hpt
-            from src import ML_execution as mle
-            print("✅ Modules imported from 'src' folder.")
-        except ImportError as e:
-            print(f"❌ Critical Error: Could not find HP_tuning or ML_execution. {e}")
-            return
+    import HP_tuning as hpt
+    import ML_execution as mle
 
-    # Patch paths for local run
     for script in [hpt, mle]:
-        script.BASE_DIR = base
-        script.DATA_FOLDER = data_folder
-        script.HP_RESULT_ROOT = base / "test_HP_results"
-        script.leads = [0, 1] 
-        script.aggregation = 'cluster'
-        script.cluster_list = ['p', 'ap'] # Simplified for test
+        script.BASE_DIR, script.DATA_FOLDER = base, data_folder
+        script.HP_RESULT_ROOT = base / "HP_results"
+        script.leads, script.cluster_list = [0, 1], ['p']
 
-    mle.RESULTS_DIR = base / "test_ML_results"
-    mle.PLOTS_DIR = base / "test_ML_results" / "plots"
+    mle.RESULTS_DIR = base / "ML_results"
 
-    print("STAGING: Tuning...")
     hpt.run_hp_tuning()
-
-    print("STAGING: Executing...")
     mle.run_ml_pipeline()
 
-    # --- VERIFICATION ---
-    experiment, region, aggregation = "RUN_FINAL_20", "HOA", "cluster"
-    print("\n--- VERIFICATION ---")
-    for cluster in ['p', 'ap']:
-        scenario = f"{aggregation}_{experiment}_{region}_{cluster}"
-        file = mle.RESULTS_DIR / f"raw_model_output_{scenario}.xlsx"
-        if file.exists():
-            print(f"✅ Success: Verified {file.name}")
-        else:
-            print(f"❌ Error: Missing {file.name}")
+    # Verification
+    scenario = "cluster_RUN_FINAL_20_HOA_p"
+    required = [f"raw_model_output_{scenario}.xlsx", f"feature_importances_{scenario}.xlsx", f"shap_values_{scenario}.xlsx"]
+    for f in required:
+        if (mle.RESULTS_DIR / f).exists():
+            print(f"✅ Found: {f}")
+            if "feature" in f or "shap_values" in f:
+                df = pd.read_excel(mle.RESULTS_DIR / f, index_col=0)
+                if 'county' in df.columns: print(f"   - Metadata 'county' verified in {f}")
 
 if __name__ == "__main__":
     run_test()

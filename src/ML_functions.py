@@ -128,3 +128,17 @@ def P_mask(p_input, month, resample, p_thres):
     mask = mask.where(mask.tp > p_thres, 0)
     mask = mask.where(mask.tp == 0, 1)
     return mask
+
+def safe_read_csv(path):
+    df = pd.read_csv(path, low_memory=False)
+
+    for col in df.columns:
+        if df[col].dtype == object:
+            df[col] = (
+                df[col]
+                .astype(str)
+                .str.replace(r"[\[\]\s\r\n]", "", regex=True)
+            )
+            df[col] = pd.to_numeric(df[col], errors="ignore")
+
+    return df
