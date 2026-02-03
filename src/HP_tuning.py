@@ -25,7 +25,7 @@ BASE_DIR = Path(f"/gcs/{CLEAN_BUCKET}") if CLEAN_BUCKET else Path(os.getcwd())
 DATA_FOLDER = BASE_DIR / "input_collector"
 HP_RESULT_ROOT = BASE_DIR / "HP_results"
 
-# --- DESIGN VARIABLES (Notebook Compatible) ---
+# --- DESIGN VARIABLES ---
 model_list = ['xgb']
 region_list = ['HOA'] 
 cluster_list = ['p', 'ap', 'other'] 
@@ -56,7 +56,6 @@ def run_hp_tuning():
     for experiment in experiment_list:
         for model_type in model_list:
             for region in region_list:
-                # Directory structure matching the scenario logic
                 hp_folder_root = HP_RESULT_ROOT / f"{aggregation}_{experiment}_{region}_{model_type}"
                 hp_folder_root.mkdir(parents=True, exist_ok=True)
                 
@@ -82,9 +81,7 @@ def run_hp_tuning():
                         param_grid = {"max_depth": [3, 4, 6], "learning_rate": [0.01, 0.05], "n_estimators": [200, 400]}
                         
                         grid = GridSearchCV(XGBRegressor(random_state=42), param_grid, cv=tscv, scoring="neg_mean_absolute_error", n_jobs=-1)
-                        logger.info(f"🚀 Tuning: {region} | {cluster} | Lead {lead}")
                         grid.fit(X, y)
-
                         save_best_params(grid.best_params_, hp_folder_root / f"best_params_{model_type}_L{lead}.json")
 
 if __name__ == "__main__":

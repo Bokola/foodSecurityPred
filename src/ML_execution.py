@@ -22,7 +22,6 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from pathlib import Path
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import mean_absolute_error, mean_squared_error
 from xgboost import XGBRegressor
 import shap
 import wandb
@@ -31,16 +30,13 @@ from src.ML_functions import load_best_params
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-# --- PATHS ---
 BUCKET_NAME = os.getenv("BUCKET_NAME", "")
 CLEAN_BUCKET = BUCKET_NAME.replace("gs://", "").replace("gs:/", "").strip("/")
 BASE_DIR = Path(f"/gcs/{CLEAN_BUCKET}") if CLEAN_BUCKET else Path(os.getcwd())
 DATA_FOLDER = BASE_DIR / "input_collector"
 RESULTS_DIR = BASE_DIR / "ML_results"
-PLOTS_DIR = RESULTS_DIR / "plots"
 HP_RESULT_ROOT = BASE_DIR / "HP_results"
 
-# --- DESIGN VARIABLES ---
 model_list = ['xgb']
 region_list = ['HOA'] 
 experiment_list = ['RUN_FINAL_20']
@@ -51,58 +47,34 @@ aggregation = 'cluster'
 def clean_scientific_brackets(df):
     df = df.copy()
     df.columns = [re.sub(r'[^a-zA-Z0-9_]', '', str(c).replace("[", "").replace("]", "").strip()) for c in df.columns]
-    cols_to_skip = {"county", "lhz", "base_forecast", "FEWS_CS", "FEWSCS", "date", "Unnamed0", "lead", "country"}
-    for col in df.columns:
-        if col in cols_to_skip: continue
-        cleaned = df[col].astype(str).str.replace(r'[^0-9.eE\-]', '', regex=True)
-        df[col] = pd.to_numeric(cleaned, errors="coerce")
-    numeric_cols = df.select_dtypes(include=[np.number]).columns
-    df[numeric_cols] = df[numeric_cols].fillna(0.0).astype(np.float64)
     return df
 
 def run_ml_pipeline():
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-    PLOTS_DIR.mkdir(parents=True, exist_ok=True)
-    
-    input_path = DATA_FOLDER / "input_master.csv"
-    if not input_path.exists():
-        logger.error(f"Input file not found at {input_path}")
-        return
-
-    input_master_raw = pd.read_csv(input_path, low_memory=False)
+    input_master_raw = pd.read_csv(DATA_FOLDER / "input_master.csv", low_memory=False)
     input_master_raw = clean_scientific_brackets(input_master_raw)
 
     for experiment in experiment_list:
         for model_type in model_list:
             for region in region_list:
                 for cluster in cluster_list:
-                    # Construct scenario name for notebook compatibility
                     scenario = f"{aggregation}_{experiment}_{region}_{cluster}"
                     wandb.init(project="drought_forecasting", name=scenario, reinit=True)
                     
                     df_run = input_master_raw.copy()
-                    if region != 'HOA':
-                        df_run = df_run[df_run['country'] == region]
+                    if region != 'HOA': df_run = df_run[df_run['country'] == region]
                     df_run = df_run[df_run['lhz'] == cluster]
 
-                    preds_storage = pd.DataFrame()
-                    eval_stats = pd.DataFrame()
-                    feat_imp_storage = pd.DataFrame()
-                    
-                    # SHAP masters for this specific scenario/cluster
-                    shap_values_all, shap_data_all, shap_base_all = [], [], []
+                    preds_storage, shap_values_all = pd.DataFrame(), []
 
                     for lead in leads:
                         df = df_run[df_run["lead"] == lead].sort_index().copy()
                         if df.empty or len(df) < 5: continue
                         
-                        if region == 'HOA':
-                            df = pd.get_dummies(df, columns=['country'], prefix='country')
-
                         target_col = "FEWSCS" if "FEWSCS" in df.columns else "FEWS_CS"
-                        y = pd.to_numeric(df[target_col], errors="coerce").fillna(0.0).astype(np.float64)
+                        y = pd.to_numeric(df[target_col], errors="coerce").fillna(0.0)
                         X = df.drop(columns=[target_col, "lead", "base_forecast", "county", "lhz", "date", "Unnamed0", "country"], errors="ignore")
-                        X = X.select_dtypes(include=[np.number]).astype(np.float64).fillna(0.0)
+                        X = X.select_dtypes(include=[np.number]).fillna(0.0)
 
                         train_X, test_X, train_y, test_y = train_test_split(X, y, test_size=0.2, shuffle=False)
                         
@@ -113,54 +85,13 @@ def run_ml_pipeline():
                         model.fit(train_X, train_y)
 
                         preds = model.predict(test_X)
-                        
-                        # Store prediction data (columns must match notebook expectations)
                         p_data = pd.DataFrame({
-                            'observed': test_y.values, 
-                            'prediction': preds, 
-                            'base1_preds': df.loc[test_X.index, 'observed_previous_IPC'].values if 'observed_previous_IPC' in df.columns else test_y.values,
-                            'base2_preds': df.loc[test_X.index, 'observed_previous_year_IPC'].values if 'observed_previous_year_IPC' in df.columns else test_y.values,
-                            'FEWS_prediction': df.loc[test_X.index, 'FEWS_prediction'].values if 'FEWS_prediction' in df.columns else np.nan,
-                            'lead': lead, 
-                            'county': df.loc[test_X.index, 'county'].values,
-                            'cluster': cluster
+                            'observed': test_y.values, 'prediction': preds, 'lead': lead, 
+                            'county': df.loc[test_X.index, 'county'].values, 'cluster': cluster
                         }, index=test_X.index)
                         preds_storage = pd.concat([preds_storage, p_data])
 
-                        # Feature Importance
-                        fi = pd.DataFrame({'feature': X.columns, 'importance': model.feature_importances_, 'lead': lead, 'cluster': cluster})
-                        feat_imp_storage = pd.concat([feat_imp_storage, fi])
-
-                        # SHAP logic
-                        try:
-                            bg = train_X.sample(min(len(train_X), 100))
-                            explainer = shap.KernelExplainer(model.predict, bg)
-                            sample_test_X = test_X.sample(min(len(test_X), 100))
-                            shap_vals = explainer.shap_values(sample_test_X, nsamples=500, silent=True)
-                            
-                            sv_df = pd.DataFrame(shap_vals, columns=sample_test_X.columns, index=sample_test_X.index)
-                            sv_df['lead'] = lead
-                            shap_values_all.append(sv_df)
-                            
-                            sd_df = sample_test_X.copy()
-                            sd_df['lead'] = lead
-                            shap_data_all.append(sd_df)
-                            
-                            sb_df = pd.DataFrame({'base_value': [explainer.expected_value]}, index=[lead])
-                            shap_base_all.append(sb_df)
-                        except Exception as e:
-                            logger.error(f"SHAP failed for {cluster} L{lead}: {e}")
-
-                    # Export using exact names found in plots_paper.ipynb Cell 5 and Cell 26
-                    if not preds_storage.empty:
-                        preds_storage.to_excel(RESULTS_DIR / f"raw_model_output_{scenario}.xlsx")
-                        feat_imp_storage.to_excel(RESULTS_DIR / f"feature_importances_{scenario}.xlsx")
-                        
-                        if shap_values_all:
-                            pd.concat(shap_values_all).to_excel(RESULTS_DIR / f"shap_values_{scenario}.xlsx")
-                            pd.concat(shap_data_all).to_excel(RESULTS_DIR / f"shap_data_{scenario}.xlsx")
-                            pd.concat(shap_base_all).to_excel(RESULTS_DIR / f"shap_base_values_{scenario}.xlsx")
-                    
+                    preds_storage.to_excel(RESULTS_DIR / f"raw_model_output_{scenario}.xlsx")
                     wandb.finish()
 
 if __name__ == "__main__":
