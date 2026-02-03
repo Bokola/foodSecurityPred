@@ -11,6 +11,7 @@ Current implementation allows for a random forest model or an XGBoost model, on 
 
 Reorganized for vertex AI environment by Basil Okola.
 """
+
 import os
 import re
 import logging
