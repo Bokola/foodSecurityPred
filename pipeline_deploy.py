@@ -38,8 +38,6 @@ def drought_pipeline():
     # Resource Allocation
     tuning_task.set_cpu_limit('4')
     tuning_task.set_memory_limit('16G')
-    # Use standard machine type for tuning
-    tuning_task.set_machine_type('n1-standard-4') 
     tuning_task.set_retry(num_retries=1) 
     tuning_task.set_display_name("HP Tuning: XGBoost Clusters")
     
@@ -48,16 +46,13 @@ def drought_pipeline():
     execution_task.set_env_variable(name="WANDB_API_KEY", value=WANDB_API_KEY)
     execution_task.set_env_variable(name="BUCKET_NAME", value=f"gs://{BUCKET_NAME}")
     
-    # --- RESOURCE FIXES ---
-    # SHAP KernelExplainer is parallelized but RAM-hungry.
-    # 8 CPUs and 32G RAM maps to an n1-standard-8 machine.
+    # Resource Allocation - SHAP is memory-intensive
     execution_task.set_cpu_limit('8')
     execution_task.set_memory_limit('32G') 
-    execution_task.set_machine_type('n1-standard-8') # Force a machine with consistent RAM/CPU ratio
     
-    # --- CACHING & RETRIES ---
+    # Caching & Retries
     execution_task.set_caching_options(enable_caching=False)
-    execution_task.set_retry(num_retries=1) # Give SHAP a second chance if it hits a transient GCP error
+    execution_task.set_retry(num_retries=1) 
     execution_task.set_display_name("Training & XAI: SHAP Explanations")
     
     # Dependency management
